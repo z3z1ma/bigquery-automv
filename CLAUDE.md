@@ -47,9 +47,23 @@ Format and lint code using the provided Makefile:
 ```bash
 make style      # Format code with ruff
 make lint       # Check code with ruff
+make test       # Run tests with pytest
 make check      # Run both format and lint checks
 ```
 These use `uvx ruff` to ensure consistent versions without manual installation.
+
+### Testing
+
+This project uses **pytest** for testing. Tests can be run via `uv run pytest` or the Makefile target:
+
+```bash
+make test              # Run all tests via Makefile
+uv run pytest          # Run all tests directly
+uv run pytest tests/   # Run tests in specific directory
+uv run pytest -k test_name  # Run tests matching pattern
+uv run pytest -v       # Verbose output
+uv run pytest --cov   # Run with coverage report
+```
 
 ## Changelog Management
 
