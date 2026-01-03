@@ -1,0 +1,11 @@
+{
+  "enabledPlugins": {
+    "pyright-lsp@claude-plugins-official": true,
+    "database-cloud-optimization@claude-code-workflows": true,
+    "data-engineering@claude-code-workflows": true,
+    "database-design@claude-code-workflows": true,
+    "developer-essentials@claude-code-workflows": true,
+    "python-development@claude-code-workflows": true,
+    "python-development@claude-code-workflows": true
+  }
+}

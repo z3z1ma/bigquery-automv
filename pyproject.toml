@@ -1,0 +1,16 @@
+[project]
+name = "bigquery-automv"
+version = "0.1.0"
+description = "Add your description here"
+authors = [
+    { name = "z3z1ma", email = "butler.alex2010@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = []
+
+[project.scripts]
+bigquery-automv = "bigquery_automv:main"
+
+[build-system]
+requires = ["uv_build>=0.9.16,<0.10.0"]
+build-backend = "uv_build"
