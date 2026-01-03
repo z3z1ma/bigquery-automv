@@ -6,6 +6,10 @@
     "database-design@claude-code-workflows": true,
     "developer-essentials@claude-code-workflows": true,
     "python-development@claude-code-workflows": true,
-    "python-development@claude-code-workflows": true
+    "python-development@claude-code-workflows": true,
+    "docs@context-engineering-kit": true,
+    "kaizen@context-engineering-kit": true,
+    "reflexion@context-engineering-kit": true,
+    "sadd@context-engineering-kit": true
   }
 }
