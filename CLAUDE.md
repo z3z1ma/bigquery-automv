@@ -50,3 +50,80 @@ make lint       # Check code with ruff
 make check      # Run both format and lint checks
 ```
 These use `uvx ruff` to ensure consistent versions without manual installation.
+
+## Changelog Management
+
+This project uses **changie** for changelog management. Changie organizes changes as fragment files that are batched into releases.
+
+### Creating Change Entries
+
+When making changes that should be recorded in the changelog:
+```bash
+changie new
+```
+This will prompt for:
+- **Component**: The area affected (e.g., cli, analyzer, mv)
+- **Kind**: Type of change (added, changed, deprecated, removed, fixed, security)
+- **Body**: Description of the change
+
+Flags for automation:
+- `--kind string` - Set change kind without prompt
+- `--component string` - Set component without prompt
+- `--body string` - Set body without prompt
+- `--editor` - Edit body message using $EDITOR
+- `--dry-run` - Print fragment instead of writing
+
+### Batching Releases
+
+When preparing a release, `changie batch` and `uv version` are used together:
+
+```bash
+# Always use explicit versions
+changie batch 1.2.3
+uv version 1.2.3
+```
+
+**Version bump options (uv):**
+- `--bump major` - Bump major version (0.x.x -> 1.x.x)
+- `--bump minor` - Bump minor version (1.0.x -> 1.1.x)
+- `--bump patch` - Bump patch version (1.0.0 -> 1.0.1)
+- `1.2.3` - Set explicit version
+
+**Important:**
+- Versions are forward-only (never downgrade)
+- Run `changie batch` first to generate the changelog
+- Run `uv version` to update `pyproject.toml`
+- Commit both changes together as part of the release
+
+After batching:
+```bash
+changie merge    # Merge all versions into one changelog
+```
+
+## Architecture Decision Records
+
+This project uses **adrgen** to document Architecture Decision Records (ADRs). ADRs capture significant architectural decisions for future contributors and maintainers.
+
+### Creating ADRs
+
+When making significant architectural decisions:
+```bash
+adrgen create "The decision title"
+```
+This creates a numbered ADR file in the `docs/adr/` directory with a template for:
+- **Status**: Proposed, accepted, rejected, deprecated, or superseded
+- **Context**: Background and problem statement
+- **Decision**: The chosen approach
+- **Consequences**: Impact and trade-offs
+
+Flags for relationship tracing:
+- `--supersedes int` - Mark this ADR as replacing a previous decision
+- `--amends int` - Mark this ADR as modifying a previous decision
+- `--meta key=value` - Add custom metadata
+
+### Managing ADRs
+
+```bash
+adrgen list              # List all ADR files
+adrgen status <id>       # Update status of an existing ADR
+```
