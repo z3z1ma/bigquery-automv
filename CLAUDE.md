@@ -127,3 +127,66 @@ Flags for relationship tracing:
 adrgen list              # List all ADR files
 adrgen status <id>       # Update status of an existing ADR
 ```
+
+## GitHub Integration
+
+This repository is hosted on GitHub. The `gh` CLI tool is used for GitHub operations.
+
+### Issue Tracking
+
+GitHub issues can be filed or discovered and linked to beads for external tracking:
+
+```bash
+# View existing issues
+gh issue list
+gh issue view <number>
+
+# Create a new issue
+gh issue create --title "Title" --body "Description"
+
+# Search issues
+gh issue list --search "query"
+gh search issues --open --repo z3z1ma/bigquery-automv "query"
+```
+
+### CI/CD Monitoring
+
+Check CI workflow runs to ensure builds are clean before merging:
+
+```bash
+# List recent workflow runs
+gh run list
+
+# View details of a specific run
+gh run view <run-id>
+
+# Watch a run in real-time
+gh run watch
+
+# View failed runs only
+gh run list --json databaseId,status,conclusion,name | jq '.[] | select(.conclusion == "failure")'
+```
+
+### Pull Requests
+
+```bash
+gh pr list              # List pull requests
+gh pr view <number>     # View PR details
+gh pr checks <number>   # Check CI status for a PR
+```
+
+## AI Review
+
+Get a second set of expert eyes on code, specs, plans, ADRs, or tests using `gemini`:
+
+```bash
+gemini --yolo -m gemini-3-pro-preview -p 'Review this code for issues and improvements'
+gemini --yolo -m gemini-3-pro-preview -p 'Critique this ADR and suggest alternatives'
+gemini --yolo -m gemini-3-pro-preview -p 'Check this test plan for edge cases'
+```
+
+Use cases:
+- **Code review** - Catch bugs, security issues, or anti-patterns
+- **Spec/plan review** - Validate approach, identify missing requirements
+- **ADR critique** - Challenge assumptions, suggest alternatives
+- **Test coverage** - Find gaps in test scenarios
