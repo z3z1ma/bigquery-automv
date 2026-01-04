@@ -7,7 +7,7 @@ effectiveness through BigQuery INFORMATION_SCHEMA.JOBS materialized_view_statist
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from bigquery_automv.lib.config import ImpactScoringConfig
 from bigquery_automv.lib.logging import get_logger
@@ -113,8 +113,8 @@ class ImpactService:
         if baseline_mode == "previous_period":
             # Calculate previous period of same length
             days_diff = (end_date - start_date).days
-            baseline_end_calc = start_date - datetime.timedelta(days=1)
-            baseline_start_calc = baseline_end_calc - datetime.timedelta(days=days_diff)
+            baseline_end_calc = start_date - timedelta(days=1)
+            baseline_start_calc = baseline_end_calc - timedelta(days=days_diff)
             baseline_period_start = datetime.combine(baseline_start_calc, datetime.min.time())
             baseline_period_end = datetime.combine(baseline_end_calc, datetime.max.time())
         elif baseline_mode == "explicit_range":

@@ -12,6 +12,7 @@ from bigquery_automv.lib.config import AnalysisConfig, ImpactScoringConfig
 from bigquery_automv.lib.logging import get_logger
 from bigquery_automv.models.query_candidate import QueryCandidate, TableReference
 from bigquery_automv.services.bq_client import BigQueryClient
+from bigquery_automv.services.smart_tuning import SmartTuningService
 
 
 @dataclass
@@ -61,6 +62,7 @@ class AnalyzerService:
         self,
         client: BigQueryClient,
         *,
+        smart_tuning_service: SmartTuningService | None = None,
         impact_config: ImpactScoringConfig | None = None,
         analysis_config: AnalysisConfig | None = None,
     ) -> None:
@@ -68,10 +70,12 @@ class AnalyzerService:
 
         Args:
             client: BigQuery client instance
+            smart_tuning_service: Smart tuning eligibility checker
             impact_config: Impact scoring configuration
             analysis_config: Analysis configuration
         """
         self._client = client
+        self._smart_tuning_service = smart_tuning_service
         self._impact_config = impact_config or ImpactScoringConfig()
         self._analysis_config = analysis_config or AnalysisConfig()
         self._logger = get_logger("analyzer")
@@ -127,7 +131,7 @@ class AnalyzerService:
 
         # Phase 4: Generate candidates
         phase_start = time.time()
-        candidates = self._generate_candidates(filtered_groups)
+        candidates = await self._generate_candidates(filtered_groups)
         phase_times["generate_candidates"] = time.time() - phase_start
 
         # Phase 5: Sort and limit
@@ -288,7 +292,7 @@ class AnalyzerService:
 
         return filtered
 
-    def _generate_candidates(
+    async def _generate_candidates(
         self,
         grouped_jobs: dict[str, list[dict]],
     ) -> list[QueryCandidate]:
@@ -340,8 +344,26 @@ class AnalyzerService:
                 default=datetime.now(),
             )
 
+            # Determine Smart Tuning eligibility
+            smart_tuning_eligible = False
+            eligibility_basis = "stable"
+            smart_tuning_reasons: list[str] = []
+
             # Check for NULL bytes_billed (T036: row-level security)
             has_null_bytes = any(job.get("total_bytes_billed") is None for job in jobs)
+            if has_null_bytes:
+                smart_tuning_reasons.append("Contains NULL total_bytes_billed (row-level security query)")
+
+            # Run Smart Tuning eligibility check if service is available
+            if self._smart_tuning_service and representative_query:
+                eligibility_result = await self._smart_tuning_service.check_elibility(
+                    sql=representative_query,
+                    query_hash=query_hash,
+                )
+                smart_tuning_eligible = eligibility_result.eligible
+                eligibility_basis = eligibility_result.eligibility_basis
+                if not eligibility_result.eligible:
+                    smart_tuning_reasons.extend(eligibility_result.disqualification_reasons)
 
             candidate = QueryCandidate(
                 query_hash=query_hash,
@@ -358,11 +380,9 @@ class AnalyzerService:
                 last_seen=last_seen,
                 referenced_tables=referenced_tables,
                 statement_type=representative_job.get("statement_type", "SELECT"),
-                smart_tuning_eligible=False,  # Will be determined by SmartTuningService
-                eligibility_basis="stable",
-                smart_tuning_reasons=(
-                    ["Contains NULL total_bytes_billed (row-level security query)"] if has_null_bytes else []
-                ),
+                smart_tuning_eligible=smart_tuning_eligible,
+                eligibility_basis=eligibility_basis,
+                smart_tuning_reasons=smart_tuning_reasons,
             )
 
             candidates.append(candidate)

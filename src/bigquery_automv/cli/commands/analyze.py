@@ -20,6 +20,7 @@ from bigquery_automv.services.bq_client import (
     NotFoundError,
     PermissionError,
 )
+from bigquery_automv.services.smart_tuning import SmartTuningService
 
 
 class ExitCode:
@@ -36,6 +37,7 @@ async def _run_analysis(
     common: CommonConfig,
     analysis_config: AnalysisConfig,
     impact_config: ImpactScoringConfig,
+    include_ineligible: bool = False,
 ) -> AnalysisResult:
     """Run the analysis asynchronously.
 
@@ -45,6 +47,7 @@ async def _run_analysis(
         common: Common configuration
         analysis_config: Analysis configuration
         impact_config: Impact scoring configuration
+        include_ineligible: Include candidates that are not eligible for Smart Tuning
 
     Returns:
         AnalysisResult
@@ -76,9 +79,16 @@ async def _run_analysis(
         project_id=common.project,
         region=common.region,
     ) as client:
+        # Create Smart Tuning service for eligibility checks
+        smart_tuning_service = SmartTuningService(
+            bq_client=client,
+            enable_preview_eligibility=False,  # Use stable-only features
+        )
+
         # Create analyzer service
         analyzer = AnalyzerService(
             client=client,
+            smart_tuning_service=smart_tuning_service,
             impact_config=impact_config,
             analysis_config=analysis_config,
         )
@@ -93,6 +103,27 @@ async def _run_analysis(
             end_date=end_datetime,
             project_id=common.project,
         )
+
+        # Filter candidates based on eligibility if requested
+        if not include_ineligible:
+            eligible_candidates = [c for c in result.candidates if c.smart_tuning_eligible]
+            logger.info(
+                "Filtered candidates by eligibility",
+                extra={
+                    "total_candidates": len(result.candidates),
+                    "eligible_candidates": len(eligible_candidates),
+                    "ineligible_filtered": len(result.candidates) - len(eligible_candidates),
+                },
+            )
+            # Update result with filtered candidates
+            result = AnalysisResult(
+                candidates=eligible_candidates,
+                metrics=result.metrics,
+                start_date=result.start_date,
+                end_date=result.end_date,
+                project_id=result.project_id,
+                region=result.region,
+            )
 
         return result
 
@@ -184,6 +215,14 @@ def analyze(
             help="Smart Tuning rulebook version for eligibility checks",
         ),
     ] = "latest",
+    include_ineligible: Annotated[
+        bool,
+        Parameter(
+            name="--include-ineligible",
+            help="Include candidates that are not eligible for Smart Tuning",
+            negative=False,
+        ),
+    ] = False,
     *,
     common: Annotated[
         CommonConfig | None,
@@ -264,6 +303,7 @@ def analyze(
                 common=common,
                 analysis_config=analysis_config,
                 impact_config=impact_config,
+                include_ineligible=include_ineligible,
             )
         )
 
