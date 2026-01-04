@@ -211,6 +211,14 @@ class MVGeneratorService:
             prefix=mv_prefix,
         )
 
+        # Check optimization value of the FINAL query (T097)
+        self._validate_mv_value(
+            shared_predicates=shared_predicates,
+            group_by_expressions=group_by_expressions,
+            select_expressions=select_expressions,
+            query_hash=candidate.query_hash,
+        )
+
         # Build DDL with recommended structure from Smart Tuning
         ddl = self._generate_ddl(
             mv_name=mv_name,
@@ -1211,3 +1219,31 @@ FROM {base_table}
         norm1 = " ".join(pred1.upper().split())
         norm2 = " ".join(pred2.upper().split())
         return norm1 == norm2
+
+    def _validate_mv_value(
+        self,
+        *,
+        shared_predicates: list[str],
+        group_by_expressions: list[str],
+        select_expressions: list[str],
+        query_hash: str,
+    ) -> None:
+        """Validate that the generated MV provides actual optimization value.
+
+        Rejects "Identity MVs" which are just SELECT ... FROM ... without
+        any filtering or aggregation.
+        """
+        has_filters = len(shared_predicates) > 0
+        has_aggregation = len(group_by_expressions) > 0
+
+        # Check if SELECT contains DISTINCT (heuristic)
+        # We check upper case, though usually expressions are extracted as-is
+        has_distinct = any("DISTINCT" in expr.upper() for expr in select_expressions)
+
+        if not (has_filters or has_aggregation or has_distinct):
+            raise MVGenerationError(
+                "Generated MV provides no optimization value (Identity MV). "
+                "It lacks filtering, aggregation, or DISTINCT, resulting in a simple projection of the base table.",
+                reason="identity_mv",
+                query_hash=query_hash,
+            )
