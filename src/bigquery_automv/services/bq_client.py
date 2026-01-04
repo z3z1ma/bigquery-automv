@@ -680,6 +680,7 @@ class BigQueryClient:
   total_slot_ms_saved INT64,
   last_used TIMESTAMP
 )
+PARTITION BY TIMESTAMP_TRUNC(created_at, DAY)
 CLUSTER BY status
 OPTIONS (
   partition_expiration_days = 365,
@@ -725,6 +726,171 @@ OPTIONS (
         query_params = [(k, "STRING", v) for k, v in metadata.items()]
 
         return await self.run_query(sql, query_params=query_params)
+
+    async def initialize_candidates_table(
+        self,
+        dataset_id: str,
+        table_name: str = "query_candidates",
+        *,
+        project_id: str | None = None,
+    ) -> QueryResult:
+        """Create the candidates table for storing analyzed query candidates.
+
+        Args:
+            dataset_id: Dataset ID for the candidates table
+            table_name: Table name (default: "query_candidates")
+            project_id: Project ID (defaults to client's project)
+
+        Returns:
+            QueryResult with execution metadata
+
+        Raises:
+            PermissionError: If lacking permissions
+            NotFoundError: If dataset doesn't exist
+            BigQueryClientError: For other errors
+        """
+        project = project_id or self._project_id
+        full_table_name = f"{project}.{dataset_id}.{table_name}"
+
+        ddl = f"""CREATE TABLE IF NOT EXISTS {full_table_name} (
+  query_hash STRING NOT NULL,
+  representative_query STRING,
+  execution_count INT64,
+  bytes_billed_total INT64,
+  total_bytes_processed INT64,
+  slot_ms_total INT64,
+  impact_score FLOAT64,
+  dollar_cost_est_on_demand FLOAT64,
+  impact_model_version STRING,
+  rulebook_version STRING,
+  statement_type STRING,
+  first_seen TIMESTAMP,
+  last_seen TIMESTAMP,
+  referenced_tables ARRAY<STRUCT<
+    project_id STRING,
+    dataset_id STRING,
+    table_id STRING,
+    region STRING,
+    full_name STRING
+  >>,
+  smart_tuning_eligible BOOL,
+  eligibility_basis STRING,
+  smart_tuning_reasons ARRAY<STRING>,
+  analysis_start_date TIMESTAMP,
+  analysis_end_date TIMESTAMP,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+)
+CLUSTER BY smart_tuning_eligible, impact_score
+OPTIONS (
+  description = "BigQuery AutoMV query candidates from analysis"
+)"""
+
+        return await self.execute_ddl(ddl)
+
+    async def insert_candidate(
+        self,
+        dataset_id: str,
+        candidate: dict,
+        *,
+        table_name: str = "query_candidates",
+        project_id: str | None = None,
+    ) -> QueryResult:
+        """Insert a query candidate record.
+
+        Args:
+            dataset_id: Dataset ID for the candidates table
+            candidate: Dictionary with candidate fields
+            table_name: Table name (default: "query_candidates")
+            project_id: Project ID (defaults to client's project)
+
+        Returns:
+            QueryResult with execution metadata
+
+        Raises:
+            PermissionError: If lacking permissions
+            NotFoundError: If candidates table doesn't exist
+            BigQueryClientError: For other errors
+        """
+        project = project_id or self._project_id
+        full_table_name = f"{project}.{dataset_id}.{table_name}"
+
+        # Build INSERT statement
+        field_names = ", ".join(candidate.keys())
+        value_placeholders = ", ".join(f"@{k}" for k in candidate.keys())
+
+        sql = f"INSERT INTO {full_table_name} ({field_names}) VALUES ({value_placeholders})"
+
+        # Convert dict values to query parameters
+        # Need to handle complex types (ARRAY, STRUCT) as JSON
+        query_params = []
+        for k, v in candidate.items():
+            if isinstance(v, (list, dict)):
+                # For complex types, convert to JSON string and use STRING type
+                import json
+
+                query_params.append((k, "STRING", json.dumps(v)))
+            elif isinstance(v, (int, float, str, bool)):
+                param_type = (
+                    "INT64"
+                    if isinstance(v, int)
+                    else "FLOAT64"
+                    if isinstance(v, float)
+                    else "BOOL"
+                    if isinstance(v, bool)
+                    else "STRING"
+                )
+                query_params.append((k, param_type, v))
+            elif v is None:
+                query_params.append((k, "STRING", None))
+            else:
+                # For timestamps, convert to ISO string
+                if hasattr(v, "isoformat"):
+                    query_params.append((k, "STRING", v.isoformat()))
+                else:
+                    query_params.append((k, "STRING", str(v)))
+
+        return await self.run_query(sql, query_params=query_params)
+
+    async def get_candidate(
+        self,
+        query_hash: str,
+        dataset_id: str,
+        *,
+        table_name: str = "query_candidates",
+        project_id: str | None = None,
+    ) -> dict | None:
+        """Get a query candidate by hash.
+
+        Args:
+            query_hash: Query family hash to look up
+            dataset_id: Dataset ID for the candidates table
+            table_name: Table name (default: "query_candidates")
+            project_id: Project ID (defaults to client's project)
+
+        Returns:
+            Dictionary with candidate data, or None if not found
+
+        Raises:
+            PermissionError: If lacking permissions
+            NotFoundError: If dataset doesn't exist
+            BigQueryClientError: For other errors
+        """
+        project = project_id or self._project_id
+        full_table_name = f"{project}.{dataset_id}.{table_name}"
+
+        sql = f"""SELECT * FROM `{full_table_name}`
+WHERE query_hash = @hash
+ORDER BY created_at DESC
+LIMIT 1"""
+
+        result = await self.run_query(
+            sql,
+            query_params=[("hash", "STRING", query_hash)],
+        )
+
+        if result.rows:
+            return result.rows[0]
+        return None
 
     async def query_information_schema_jobs(
         self,

@@ -38,6 +38,8 @@ async def _run_analysis(
     analysis_config: AnalysisConfig,
     impact_config: ImpactScoringConfig,
     include_ineligible: bool = False,
+    persist: bool = False,
+    persist_dataset: str | None = None,
 ) -> AnalysisResult:
     """Run the analysis asynchronously.
 
@@ -48,6 +50,8 @@ async def _run_analysis(
         analysis_config: Analysis configuration
         impact_config: Impact scoring configuration
         include_ineligible: Include candidates that are not eligible for Smart Tuning
+        persist: Persist candidates to BigQuery table
+        persist_dataset: Dataset for persisting candidates (defaults to common.dataset)
 
     Returns:
         AnalysisResult
@@ -125,7 +129,95 @@ async def _run_analysis(
                 region=result.region,
             )
 
+        # Persist candidates if requested
+        if persist:
+            target_dataset = persist_dataset or common.dataset
+            if not target_dataset:
+                logger.warning("Cannot persist candidates: no dataset specified (use --dataset or --persist-dataset)")
+            else:
+                await _persist_candidates(client, result, target_dataset, start_date, end_date)
+
         return result
+
+
+async def _persist_candidates(
+    client: BigQueryClient,
+    result: AnalysisResult,
+    dataset_id: str,
+    start_date: date,
+    end_date: date,
+) -> None:
+    """Persist analysis candidates to BigQuery table.
+
+    Args:
+        client: BigQuery client
+        result: Analysis result with candidates
+        dataset_id: Target dataset ID
+        start_date: Analysis start date
+        end_date: Analysis end date
+    """
+
+    logger = setup_logging()
+
+    # Initialize candidates table if needed
+    try:
+        await client.initialize_candidates_table(dataset_id=dataset_id)
+        logger.info(f"Initialized candidates table in {dataset_id}")
+    except Exception as e:
+        logger.error(f"Failed to initialize candidates table: {e}")
+        raise
+
+    # Convert dates to datetime for ISO format
+    start_datetime = datetime.combine(start_date, datetime.min.time())
+    end_datetime = datetime.combine(end_date, datetime.max.time())
+
+    # Persist each candidate
+    persisted = 0
+    failed = 0
+
+    for candidate in result.candidates:
+        try:
+            candidate_dict = {
+                "query_hash": candidate.query_hash,
+                "representative_query": candidate.representative_query,
+                "execution_count": candidate.execution_count,
+                "bytes_billed_total": candidate.bytes_billed_total,
+                "total_bytes_processed": candidate.total_bytes_processed,
+                "slot_ms_total": candidate.slot_ms_total,
+                "impact_score": candidate.impact_score,
+                "dollar_cost_est_on_demand": candidate.dollar_cost_est_on_demand,
+                "impact_model_version": candidate.impact_model_version,
+                "rulebook_version": candidate.rulebook_version,
+                "statement_type": candidate.statement_type,
+                "first_seen": candidate.first_seen.isoformat(),
+                "last_seen": candidate.last_seen.isoformat(),
+                "referenced_tables": [
+                    {
+                        "project_id": t.project_id,
+                        "dataset_id": t.dataset_id,
+                        "table_id": t.table_id,
+                        "region": t.region,
+                        "full_name": t.full_name,
+                    }
+                    for t in candidate.referenced_tables
+                ],
+                "smart_tuning_eligible": candidate.smart_tuning_eligible,
+                "eligibility_basis": candidate.eligibility_basis,
+                "smart_tuning_reasons": candidate.smart_tuning_reasons or [],
+                "analysis_start_date": start_datetime.isoformat(),
+                "analysis_end_date": end_datetime.isoformat(),
+            }
+
+            await client.insert_candidate(dataset_id=dataset_id, candidate=candidate_dict)
+            persisted += 1
+        except Exception as e:
+            logger.warning(f"Failed to persist candidate {candidate.query_hash}: {e}")
+            failed += 1
+
+    logger.info(
+        f"Persisted {persisted} candidates to {dataset_id}.query_candidates",
+        extra={"persisted": persisted, "failed": failed},
+    )
 
 
 @app.command
@@ -223,6 +315,21 @@ def analyze(
             negative=False,
         ),
     ] = False,
+    persist: Annotated[
+        bool,
+        Parameter(
+            name="--persist",
+            help="Persist candidates to BigQuery table for later use with generate-mv",
+            negative=False,
+        ),
+    ] = False,
+    persist_dataset: Annotated[
+        str | None,
+        Parameter(
+            name="--persist-dataset",
+            help="Dataset for persisting candidates (defaults to --dataset if not set)",
+        ),
+    ] = None,
     *,
     common: Annotated[
         CommonConfig | None,
@@ -304,6 +411,8 @@ def analyze(
                 analysis_config=analysis_config,
                 impact_config=impact_config,
                 include_ineligible=include_ineligible,
+                persist=persist,
+                persist_dataset=persist_dataset,
             )
         )
 
@@ -429,6 +538,8 @@ def format_json(result: AnalysisResult, include_query: bool = False) -> str:
             "slot_ms_total": candidate.slot_ms_total,
             "impact_score": round(candidate.impact_score, 2),
             "dollar_cost_est_on_demand": round(candidate.dollar_cost_est_on_demand, 2),
+            "impact_model_version": candidate.impact_model_version,
+            "rulebook_version": candidate.rulebook_version,
             "statement_type": candidate.statement_type,
             "first_seen": candidate.first_seen.isoformat(),
             "last_seen": candidate.last_seen.isoformat(),

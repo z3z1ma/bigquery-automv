@@ -3,6 +3,7 @@
 import asyncio
 import sys
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated
@@ -16,6 +17,7 @@ from bigquery_automv.lib.logging import get_logger
 from bigquery_automv.models.query_candidate import QueryCandidate
 from bigquery_automv.services.bq_client import BigQueryClient
 from bigquery_automv.services.mv_generator import MVGenerationError, MVGeneratorService
+from bigquery_automv.services.smart_tuning import SmartTuningService
 
 logger = get_logger(__name__)
 
@@ -138,6 +140,29 @@ def generate_mv(
             parse=lambda p: Path(p) if p else None,
         ),
     ] = None,
+    from_analyze: Annotated[
+        Path | None,
+        Parameter(
+            name="--from-analyze",
+            help="Read candidates from analyze output JSON file",
+            parse=lambda p: Path(p) if p else None,
+        ),
+    ] = None,
+    from_candidates_table: Annotated[
+        bool,
+        Parameter(
+            name="--from-candidates-table",
+            help="Read candidates from BigQuery query_candidates table in target dataset",
+            negative=False,
+        ),
+    ] = False,
+    candidates_table: Annotated[
+        str,
+        Parameter(
+            name="--candidates-table",
+            help="Custom candidates table name (default: query_candidates)",
+        ),
+    ] = "query_candidates",
     dry_run: Annotated[
         bool,
         Parameter(
@@ -195,6 +220,9 @@ def generate_mv(
             replace=replace,
             enable_auto_cleanup=enable_auto_cleanup,
             from_file=from_file,
+            from_analyze=from_analyze,
+            from_candidates_table=from_candidates_table,
+            candidates_table=candidates_table,
             dry_run=dry_run,
             yes=yes,
             common=common,
@@ -211,19 +239,33 @@ async def _generate_mv_async(
     replace: bool,
     enable_auto_cleanup: bool,
     from_file: Path | None,
+    from_analyze: Path | None,
+    from_candidates_table: bool,
+    candidates_table: str,
     dry_run: bool,
     yes: bool,
     common: CommonConfig,
 ) -> str:
     """Async implementation of generate-mv command."""
+    # Build candidates lookup from various sources
+    candidates_by_hash: dict[str, QueryCandidate] = {}
+
+    # Load from analyze output JSON
+    if from_analyze:
+        analyze_candidates = await _load_candidates_from_analyze(from_analyze)
+        candidates_by_hash.update(analyze_candidates)
+
     # T081: Handle --from-file and positional QUERY_HASH arguments
     all_hashes = list(query_hashes)
     if from_file:
         file_hashes = await _read_hashes_from_file(from_file)
         all_hashes.extend(file_hashes)
 
-    if not all_hashes:
-        return "Error: No query hashes provided. Use QUERY_HASH... arguments or --from-file."
+    if not all_hashes and not from_analyze and not from_candidates_table:
+        return (
+            "Error: No query hashes provided. Use QUERY_HASH... arguments, "
+            "--from-file, --from-analyze, or --from-candidates-table."
+        )
 
     # Validate required configuration
     if not common.project:
@@ -231,6 +273,18 @@ async def _generate_mv_async(
 
     if not common.dataset:
         return "Error: --dataset is required. Set BQ_AUTOMV_DATASET or use --dataset."
+
+    # Load from candidates table if requested
+    if from_candidates_table:
+        table_candidates = await _load_candidates_from_table(
+            common.dataset,
+            candidates_table,
+            common.project,
+            all_hashes if all_hashes else None,  # None = load all
+        )
+        candidates_by_hash.update(table_candidates)
+        if not all_hashes:
+            all_hashes = list(table_candidates.keys())
 
     # Validate target dataset exists (T095)
     logger.info(f"Validating target dataset: {common.dataset}")
@@ -258,6 +312,7 @@ async def _generate_mv_async(
     # T090: Process all hashes with continue-on-error
     batch_result = await _process_batch(
         hashes=all_hashes,
+        candidates_by_hash=candidates_by_hash,
         common=common,
         mv_prefix=mv_prefix,
         refresh_interval_minutes=refresh_interval_minutes,
@@ -300,8 +355,171 @@ async def _read_hashes_from_file(file_path: Path) -> list[str]:
     return hashes
 
 
+async def _load_candidates_from_analyze(file_path: Path) -> dict[str, QueryCandidate]:
+    """Load query candidates from analyze output JSON file.
+
+    Args:
+        file_path: Path to analyze output JSON file
+
+    Returns:
+        Dict mapping query_hash to QueryCandidate
+    """
+    import json
+    from datetime import datetime
+
+    candidates: dict[str, QueryCandidate] = {}
+
+    if not file_path.exists():
+        logger.error(f"Analyze output file not found: {file_path}")
+        return candidates
+
+    try:
+        data = json.loads(file_path.read_text())
+
+        for candidate_data in data.get("candidates", []):
+            # Reconstruct QueryCandidate from JSON
+            from bigquery_automv.services.bq_client import TableIdentifier
+
+            # Reconstruct referenced tables
+            referenced_tables = []
+            for table_data in candidate_data.get("referenced_tables", []):
+                referenced_tables.append(
+                    TableIdentifier(
+                        project_id=table_data["project_id"],
+                        dataset_id=table_data["dataset_id"],
+                        table_id=table_data["table_id"],
+                    )
+                )
+
+            candidate = QueryCandidate(
+                query_hash=candidate_data["query_hash"],
+                representative_query=candidate_data.get("representative_query", ""),
+                execution_count=candidate_data["execution_count"],
+                bytes_billed_total=candidate_data["bytes_billed_total"],
+                total_bytes_processed=candidate_data.get("total_bytes_processed", 0),
+                slot_ms_total=candidate_data.get("slot_ms_total", 0),
+                impact_score=candidate_data.get("impact_score", 0.0),
+                dollar_cost_est_on_demand=candidate_data.get("dollar_cost_est_on_demand", 0.0),
+                impact_model_version=candidate_data.get("impact_model_version", "v1.0"),
+                rulebook_version=candidate_data.get("rulebook_version", "latest"),
+                statement_type=candidate_data.get("statement_type", "SELECT"),
+                first_seen=datetime.fromisoformat(candidate_data["first_seen"]),
+                last_seen=datetime.fromisoformat(candidate_data["last_seen"]),
+                referenced_tables=referenced_tables,
+                smart_tuning_eligible=candidate_data.get("smart_tuning_eligible", True),
+                eligibility_basis=candidate_data.get("eligibility_basis", ""),
+                smart_tuning_reasons=candidate_data.get("smart_tuning_reasons"),
+            )
+
+            candidates[candidate.query_hash] = candidate
+
+        logger.info(f"Loaded {len(candidates)} candidates from {file_path}")
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse analyze output JSON: {e}")
+    except Exception as e:
+        logger.error(f"Failed to load candidates from {file_path}: {e}")
+
+    return candidates
+
+
+async def _load_candidates_from_table(
+    dataset_id: str,
+    table_name: str,
+    project_id: str,
+    query_hashes: list[str] | None = None,
+) -> dict[str, QueryCandidate]:
+    """Load query candidates from BigQuery candidates table.
+
+    Args:
+        dataset_id: Dataset ID for candidates table
+        table_name: Table name (default: query_candidates)
+        project_id: Project ID
+        query_hashes: Optional list of hashes to filter by (None = load all)
+
+    Returns:
+        Dict mapping query_hash to QueryCandidate
+    """
+    from datetime import datetime
+
+    candidates: dict[str, QueryCandidate] = {}
+
+    try:
+        async with BigQueryClient(project_id=project_id, region="US") as client:
+            # Build query
+            full_table_name = f"{project_id}.{dataset_id}.{table_name}"
+
+            if query_hashes:
+                # Query specific hashes
+                sql = f"""SELECT * FROM `{full_table_name}`
+WHERE query_hash IN UNNEST(@hashes)
+ORDER BY impact_score DESC"""
+
+                result = await client.run_query(
+                    sql,
+                    query_params=[("hashes", "ARRAY<STRING>", query_hashes)],
+                )
+            else:
+                # Query all candidates
+                sql = f"""SELECT * FROM `{full_table_name}`
+ORDER BY impact_score DESC"""
+
+                result = await client.run_query(sql)
+
+            # Reconstruct QueryCandidate objects
+            for row in result.rows:
+                # Parse referenced_tables from JSON
+                import json
+
+                from bigquery_automv.services.bq_client import TableIdentifier
+
+                referenced_tables = []
+                tables_data = row.get("referenced_tables")
+                if isinstance(tables_data, str):
+                    tables_data = json.loads(tables_data)
+                if tables_data:
+                    for table_data in tables_data:
+                        referenced_tables.append(
+                            TableIdentifier(
+                                project_id=table_data["project_id"],
+                                dataset_id=table_data["dataset_id"],
+                                table_id=table_data["table_id"],
+                            )
+                        )
+
+                candidate = QueryCandidate(
+                    query_hash=row["query_hash"],
+                    representative_query=row.get("representative_query", ""),
+                    execution_count=row["execution_count"],
+                    bytes_billed_total=row["bytes_billed_total"],
+                    total_bytes_processed=row.get("total_bytes_processed", 0),
+                    slot_ms_total=row.get("slot_ms_total", 0),
+                    impact_score=row.get("impact_score", 0.0),
+                    dollar_cost_est_on_demand=row.get("dollar_cost_est_on_demand", 0.0),
+                    impact_model_version=row.get("impact_model_version", "v1.0"),
+                    rulebook_version=row.get("rulebook_version", "latest"),
+                    statement_type=row.get("statement_type", "SELECT"),
+                    first_seen=datetime.fromisoformat(row["first_seen"]),
+                    last_seen=datetime.fromisoformat(row["last_seen"]),
+                    referenced_tables=referenced_tables,
+                    smart_tuning_eligible=row.get("smart_tuning_eligible", True),
+                    eligibility_basis=row.get("eligibility_basis", ""),
+                    smart_tuning_reasons=row.get("smart_tuning_reasons"),
+                )
+
+                candidates[candidate.query_hash] = candidate
+
+            logger.info(f"Loaded {len(candidates)} candidates from {full_table_name}")
+
+    except Exception as e:
+        logger.error(f"Failed to load candidates from table: {e}")
+
+    return candidates
+
+
 async def _process_batch(
     hashes: list[str],
+    candidates_by_hash: dict[str, QueryCandidate],
     common: CommonConfig,
     mv_prefix: str,
     refresh_interval_minutes: int,
@@ -315,6 +533,7 @@ async def _process_batch(
 
     Args:
         hashes: List of query hashes to process
+        candidates_by_hash: Dict mapping query hashes to QueryCandidate objects
         common: Common configuration
         mv_prefix: MV name prefix
         refresh_interval_minutes: MV refresh interval
@@ -346,6 +565,7 @@ async def _process_batch(
         for query_hash in hashes:
             result = await _process_single_hash(
                 query_hash=query_hash,
+                candidate=candidates_by_hash.get(query_hash),
                 common=common,
                 mv_prefix=mv_prefix,
                 refresh_interval_minutes=refresh_interval_minutes,
@@ -359,7 +579,7 @@ async def _process_batch(
             pbar.set_postfix_str(f"Status: {result.status}")
 
     # Aggregate results
-    successful = sum(1 for r in results if r.status == "success")
+    successful = sum(1 for r in results if r.status in ("success", "dry_run"))
     failed = sum(1 for r in results if r.status == "failed")
     skipped = sum(1 for r in results if r.status == "skipped")
     existing = sum(1 for r in results if r.status == "exists")
@@ -402,6 +622,7 @@ async def _confirm_deployment(hashes: list[str], replace: bool, dataset: str) ->
 
 async def _process_single_hash(
     query_hash: str,
+    candidate: QueryCandidate | None,
     common: CommonConfig,
     mv_prefix: str,
     refresh_interval_minutes: int,
@@ -414,6 +635,7 @@ async def _process_single_hash(
 
     Args:
         query_hash: Query family hash
+        candidate: QueryCandidate object (if available from lookup)
         common: Common configuration
         mv_prefix: MV name prefix
         refresh_interval_minutes: MV refresh interval
@@ -425,24 +647,40 @@ async def _process_single_hash(
     Returns:
         GenerationResult for this hash
     """
-    try:
-        # For MVP, we need to construct a QueryCandidate from just the hash
-        # In production, this would query a metadata table or query history
-        # For now, we'll create a minimal candidate
-
-        # TODO: Fetch actual query details from metadata table
-        # For now, we'll fail gracefully
+    # If no candidate found, skip
+    if candidate is None:
         return GenerationResult(
             query_hash=query_hash,
             status="skipped",
-            message="Query candidate lookup not yet implemented. Use analyze command to populate candidates.",
+            message=(
+                "Query candidate not found. Use analyze with --persist, "
+                "or specify --from-analyze or --from-candidates-table."
+            ),
         )
 
-        # When metadata table is implemented:
-        # 1. Query metadata table for query_hash
-        # 2. Reconstruct QueryCandidate
-        # 3. Use MVGeneratorService to generate artifact
-        # 4. Deploy artifact
+    try:
+        # Create BigQuery client and MV generator service
+        async with BigQueryClient(project_id=common.project, region=common.region) as bq_client:
+            smart_tuning_service = SmartTuningService(
+                bq_client=bq_client,
+                enable_preview_eligibility=False,
+            )
+            mv_generator = MVGeneratorService(
+                bq_client=bq_client,
+                smart_tuning_service=smart_tuning_service,
+            )
+
+            return await _generate_mv_from_candidate(
+                candidate=candidate,
+                common=common,
+                mv_generator=mv_generator,
+                mv_prefix=mv_prefix,
+                refresh_interval_minutes=refresh_interval_minutes,
+                enable_refresh=enable_refresh,
+                enable_auto_cleanup=enable_auto_cleanup,
+                dry_run=dry_run,
+                replace=replace,
+            )
 
     except MVGenerationError as e:
         logger.error(f"MV generation failed for {query_hash}: {e}")
@@ -501,8 +739,8 @@ async def _generate_mv_from_candidate(
             enable_auto_cleanup=enable_auto_cleanup,
         )
 
-        # Check idempotency (T085)
-        if not replace:
+        # Check idempotency (T085) - skip during dry-run
+        if not replace and not dry_run:
             exists = await mv_generator.check_mv_exists(
                 artifact.mv_name,
                 artifact.dataset_id,
@@ -554,6 +792,7 @@ async def _generate_mv_from_candidate(
         )
 
 
+@asynccontextmanager
 async def _create_progress_bar(
     hashes: list[str],
     dry_run: bool,
@@ -607,12 +846,12 @@ def _format_batch_result(result: BatchResult, dry_run: bool) -> str:
                 if r.message:
                     lines.append(f"    Message: {r.message}")
 
-    # Add DDL output for dry-run
-    if dry_run and result.successful > 0:
+    # Add DDL output for dry-run or successful with DDL
+    if (dry_run or any(r.ddl for r in result.results)) and result.successful > 0:
         lines.append("\nGenerated DDL:")
         for r in result.results:
-            if r.status == "success" and r.ddl:
-                lines.append(f"\n-- {r.mv_name} (hash: {r.query_hash})")
+            if r.status in ("success", "dry_run") and r.ddl:
+                lines.append(f"\n-- {r.mv_name} (hash: {r.query_hash[:12]})")
                 lines.append(r.ddl)
                 lines.append("")
 

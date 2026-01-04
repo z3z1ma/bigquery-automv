@@ -226,7 +226,10 @@ class MVGeneratorService:
             partition_expiration_days=365 if enable_auto_cleanup else None,
             created_at=datetime.now(UTC),
             created_by=self.bq_client._client._connection.credentials.email
-            if hasattr(self.bq_client._client._connection, "credentials")
+            if (
+                hasattr(self.bq_client._client._connection, "credentials")
+                and hasattr(self.bq_client._client._connection.credentials, "email")
+            )
             else "bq-automv",
             created_by_tool_version=self.tool_version,
             rulebook_version=eligibility_result.rulebook_version,
@@ -451,6 +454,16 @@ FROM {base_table}
         dataset_id = artifact.dataset_id
         project_id = artifact.project_id
 
+        # Deploy MV (T083) - dry-run just returns DDL without any API calls
+        if dry_run:
+            logger.info(f"DRY RUN: Would create MV {mv_name}")
+            return {
+                "status": "dry_run",
+                "mv_name": mv_name,
+                "ddl": artifact.ddl_definition,
+                "message": "DDL generated (dry run, not executed)",
+            }
+
         # Check if MV exists (T085 - idempotency)
         exists = await self.check_mv_exists(mv_name, dataset_id, project_id=project_id)
 
@@ -474,23 +487,12 @@ FROM {base_table}
         if exists and replace:
             # Drop existing MV (T084)
             logger.info(f"Dropping existing MV: {mv_name}")
-            if not dry_run:
-                await self.bq_client.drop_materialized_view(
-                    mv_name=mv_name,
-                    dataset_id=dataset_id,
-                    project_id=project_id,
-                    if_exists=False,
-                )
-
-        # Deploy MV (T083)
-        if dry_run:
-            logger.info(f"DRY RUN: Would create MV {mv_name}")
-            return {
-                "status": "dry_run",
-                "mv_name": mv_name,
-                "ddl": artifact.ddl_definition,
-                "message": "DDL generated (dry run, not executed)",
-            }
+            await self.bq_client.drop_materialized_view(
+                mv_name=mv_name,
+                dataset_id=dataset_id,
+                project_id=project_id,
+                if_exists=False,
+            )
 
         try:
             # Create MV
