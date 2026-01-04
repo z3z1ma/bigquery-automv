@@ -116,6 +116,10 @@ class QueryCandidate:
     has_ctes: bool = False
     has_unsupported_patterns: bool = False
 
+    # MV Strategy (T049, T050)
+    locked_predicates: list[str] = field(default_factory=list)
+    lifted_columns: list[str] = field(default_factory=list)
+
     # Smart Tuning eligibility
     smart_tuning_eligible: bool = False
     eligibility_basis: str = "stable"

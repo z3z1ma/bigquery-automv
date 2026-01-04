@@ -588,3 +588,22 @@ class SQLParser:
             ],
             "select_columns": self.extract_select_columns(ast),
         }
+
+    def extract_columns_from_expression(self, expression_sql: str) -> list[str]:
+        """
+        Extract column names from a SQL expression string.
+
+        Args:
+            expression_sql: SQL expression string
+
+        Returns:
+            List of column names
+        """
+        try:
+            expr = parse_one(expression_sql, dialect=self.dialect)
+            columns = set()
+            for col in expr.find_all(exp.Column):
+                columns.add(col.name)
+            return list(columns)
+        except Exception:
+            return []

@@ -309,108 +309,225 @@ class AnalyzerService:
         candidates = []
 
         for query_hash, jobs in grouped_jobs.items():
-            # Get representative query (most recent by creation_time)
-            jobs_sorted = sorted(
-                jobs,
-                key=lambda j: j.get("creation_time", datetime.min),
-                reverse=True,
-            )
-            representative_job = jobs_sorted[0]
-            representative_query = representative_job.get("query", "")
+            # Refine grouping based on partition predicates and strict locking (T049, T050)
+            sub_groups = self._refine_job_group(jobs)
 
-            # Aggregate metrics
-            execution_count = len(jobs)
-            bytes_billed_total = sum(job.get("total_bytes_billed", 0) or 0 for job in jobs)
-            total_bytes_processed = sum(job.get("total_bytes_processed", 0) or 0 for job in jobs)
-            slot_ms_total = sum(job.get("total_slot_ms", 0) or 0 for job in jobs)
+            for i, (locked_predicates, lifted_columns, sub_group_jobs) in enumerate(sub_groups):
+                # Generate unique hash for sub-group if split occurred
+                # This ensures unique identity for candidates derived from same normalized_literals
+                sub_hash = f"{query_hash}_{i}" if len(sub_groups) > 1 else query_hash
 
-            # Calculate impact score
-            impact_score = self._calculate_impact_score(
-                bytes_billed=bytes_billed_total,
-                slot_ms=slot_ms_total,
-            )
-
-            # Calculate dollar cost
-            dollar_cost_est_on_demand = self._calculate_dollar_cost(bytes_billed_total)
-
-            # Extract referenced tables
-            referenced_tables = self._extract_referenced_tables(representative_job)
-
-            # Get time range
-            first_seen = min(
-                (j.get("creation_time") for j in jobs if j.get("creation_time")),
-                default=datetime.now(),
-            )
-            last_seen = max(
-                (j.get("creation_time") for j in jobs if j.get("creation_time")),
-                default=datetime.now(),
-            )
-
-            # Extract query features
-            has_aggregations = False
-            aggregation_functions: list[str] = []
-            join_types: list[str] = []
-            has_ctes = False
-
-            try:
-                if representative_query:
-                    ast = self._parser.parse_query(representative_query)
-                    has_aggregations = self._parser.is_aggregate_query(ast)
-                    aggregation_functions = self._parser.get_aggregation_functions(ast)
-                    join_types = self._parser.get_join_types(ast)
-                    has_ctes = self._parser.has_ctes(ast)
-            except SQLParseError as e:
-                # Log warning but continue with defaults
-                self._logger.debug(f"Failed to parse query features for hash {query_hash}: {e}")
-
-            # Determine Smart Tuning eligibility
-            smart_tuning_eligible = False
-            eligibility_basis = "stable"
-            smart_tuning_reasons: list[str] = []
-
-            # Check for NULL bytes_billed (T036: row-level security)
-            has_null_bytes = any(job.get("total_bytes_billed") is None for job in jobs)
-            if has_null_bytes:
-                smart_tuning_reasons.append("Contains NULL total_bytes_billed (row-level security query)")
-
-            # Run Smart Tuning eligibility check if service is available
-            if self._smart_tuning_service and representative_query:
-                eligibility_result = await self._smart_tuning_service.check_elibility(
-                    sql=representative_query,
-                    query_hash=query_hash,
+                # Get representative query (most recent)
+                jobs_sorted = sorted(
+                    sub_group_jobs,
+                    key=lambda j: j.get("creation_time", datetime.min),
+                    reverse=True,
                 )
-                smart_tuning_eligible = eligibility_result.eligible
-                eligibility_basis = eligibility_result.eligibility_basis
-                if not eligibility_result.eligible:
-                    smart_tuning_reasons.extend(eligibility_result.disqualification_reasons)
+                representative_job = jobs_sorted[0]
+                representative_query = representative_job.get("query", "")
 
-            candidate = QueryCandidate(
-                query_hash=query_hash,
-                representative_query=representative_query,
-                execution_count=execution_count,
-                bytes_billed_total=bytes_billed_total,
-                total_bytes_processed=total_bytes_processed,
-                slot_ms_total=slot_ms_total,
-                impact_score=impact_score,
-                dollar_cost_est_on_demand=dollar_cost_est_on_demand,
-                impact_model_version="v1.0",
-                rulebook_version="v1.0",
-                first_seen=first_seen,
-                last_seen=last_seen,
-                referenced_tables=referenced_tables,
-                statement_type=representative_job.get("statement_type", "SELECT"),
-                has_aggregations=has_aggregations,
-                aggregation_functions=aggregation_functions,
-                join_types=join_types,
-                has_ctes=has_ctes,
-                smart_tuning_eligible=smart_tuning_eligible,
-                eligibility_basis=eligibility_basis,
-                smart_tuning_reasons=smart_tuning_reasons,
-            )
+                # Aggregate metrics for this sub-group
+                execution_count = len(sub_group_jobs)
+                bytes_billed_total = sum(job.get("total_bytes_billed", 0) or 0 for job in sub_group_jobs)
+                total_bytes_processed = sum(job.get("total_bytes_processed", 0) or 0 for job in sub_group_jobs)
+                slot_ms_total = sum(job.get("total_slot_ms", 0) or 0 for job in sub_group_jobs)
 
-            candidates.append(candidate)
+                # Calculate impact score
+                impact_score = self._calculate_impact_score(
+                    bytes_billed=bytes_billed_total,
+                    slot_ms=slot_ms_total,
+                )
+
+                # Calculate dollar cost
+                dollar_cost_est_on_demand = self._calculate_dollar_cost(bytes_billed_total)
+
+                # Extract referenced tables
+                referenced_tables = self._extract_referenced_tables(representative_job)
+
+                # Get time range
+                first_seen = min(
+                    (j.get("creation_time") for j in sub_group_jobs if j.get("creation_time")),
+                    default=datetime.now(),
+                )
+                last_seen = max(
+                    (j.get("creation_time") for j in sub_group_jobs if j.get("creation_time")),
+                    default=datetime.now(),
+                )
+
+                # Extract query features from representative query
+                has_aggregations = False
+                aggregation_functions: list[str] = []
+                join_types: list[str] = []
+                has_ctes = False
+
+                try:
+                    if representative_query:
+                        ast = self._parser.parse_query(representative_query)
+                        has_aggregations = self._parser.is_aggregate_query(ast)
+                        aggregation_functions = self._parser.get_aggregation_functions(ast)
+                        join_types = self._parser.get_join_types(ast)
+                        has_ctes = self._parser.has_ctes(ast)
+                except SQLParseError as e:
+                    self._logger.debug(f"Failed to parse query features for hash {sub_hash}: {e}")
+
+                # Determine Smart Tuning eligibility
+                smart_tuning_eligible = False
+                eligibility_basis = "stable"
+                smart_tuning_reasons: list[str] = []
+
+                # Check for NULL bytes_billed
+                has_null_bytes = any(job.get("total_bytes_billed") is None for job in sub_group_jobs)
+                if has_null_bytes:
+                    smart_tuning_reasons.append("Contains NULL total_bytes_billed (row-level security query)")
+
+                # Run Smart Tuning eligibility check
+                if self._smart_tuning_service and representative_query:
+                    eligibility_result = await self._smart_tuning_service.check_elibility(
+                        sql=representative_query,
+                        query_hash=sub_hash,
+                    )
+                    smart_tuning_eligible = eligibility_result.eligible
+                    eligibility_basis = eligibility_result.eligibility_basis
+                    if not eligibility_result.eligible:
+                        smart_tuning_reasons.extend(eligibility_result.disqualification_reasons)
+
+                candidate = QueryCandidate(
+                    query_hash=sub_hash,
+                    representative_query=representative_query,
+                    execution_count=execution_count,
+                    bytes_billed_total=bytes_billed_total,
+                    total_bytes_processed=total_bytes_processed,
+                    slot_ms_total=slot_ms_total,
+                    impact_score=impact_score,
+                    dollar_cost_est_on_demand=dollar_cost_est_on_demand,
+                    impact_model_version="v1.0",
+                    rulebook_version="v1.0",
+                    first_seen=first_seen,
+                    last_seen=last_seen,
+                    referenced_tables=referenced_tables,
+                    statement_type=representative_job.get("statement_type", "SELECT"),
+                    has_aggregations=has_aggregations,
+                    aggregation_functions=aggregation_functions,
+                    join_types=join_types,
+                    has_ctes=has_ctes,
+                    locked_predicates=locked_predicates,
+                    lifted_columns=lifted_columns,
+                    smart_tuning_eligible=smart_tuning_eligible,
+                    eligibility_basis=eligibility_basis,
+                    smart_tuning_reasons=smart_tuning_reasons,
+                )
+
+                candidates.append(candidate)
 
         return candidates
+
+    def _refine_job_group(
+        self,
+        jobs: list[dict],
+    ) -> list[tuple[list[str], list[str], list[dict]]]:
+        """Refine a job group by sub-grouping based on partition predicates.
+
+        Args:
+            jobs: List of jobs sharing normalized_literals
+
+        Returns:
+            List of (locked_predicates, lifted_columns, jobs) tuples
+        """
+        # Bucket jobs by partition predicate signature
+        buckets: dict[tuple[str, ...], list[dict]] = defaultdict(list)
+        # Store all predicates for each job: job_id -> list[str]
+        job_predicates: dict[str, list[str]] = {}
+
+        for job in jobs:
+            query = job.get("query", "")
+            job_id = job.get("job_id", "")
+
+            try:
+                ast = self._parser.parse_query(query)
+                predicates = self._parser.extract_where_predicates(ast)
+                job_predicates[job_id] = predicates
+
+                # Identify partition predicates
+                partition_preds = []
+                for pred in predicates:
+                    if self._is_partition_predicate(pred):
+                        partition_preds.append(pred)
+
+                # Create signature (sorted partition predicates)
+                signature = tuple(sorted(partition_preds))
+                buckets[signature].append(job)
+
+            except SQLParseError:
+                # If parse fails, put in a unique fallback bucket
+                buckets[("PARSE_ERROR", job_id)].append(job)
+                job_predicates[job_id] = []
+
+        sub_groups = []
+
+        for signature, bucket_jobs in buckets.items():
+            if signature and signature[0] == "PARSE_ERROR":
+                # Fallback group: no locking/lifting possible
+                sub_groups.append(([], [], bucket_jobs))
+                continue
+
+            # Calculate intersection of ALL predicates (Locked)
+            # Start with predicates of first job
+            first_job_id = bucket_jobs[0].get("job_id")
+            if not first_job_id:
+                continue
+
+            common_preds_set = set(job_predicates[first_job_id])
+
+            for job in bucket_jobs[1:]:
+                job_id = job.get("job_id")
+                if job_id:
+                    common_preds_set.intersection_update(job_predicates[job_id])
+
+            locked_predicates = sorted(common_preds_set)
+
+            # Calculate Lifted Columns (from predicates NOT in locked set)
+            lifted_cols_set = set()
+            for job in bucket_jobs:
+                job_id = job.get("job_id")
+                if not job_id:
+                    continue
+
+                preds = job_predicates[job_id]
+                for pred in preds:
+                    if pred not in common_preds_set:
+                        # This predicate differs, so we must lift its columns
+                        cols = self._parser.extract_columns_from_expression(pred)
+                        lifted_cols_set.update(cols)
+
+            lifted_columns = sorted(lifted_cols_set)
+
+            sub_groups.append((locked_predicates, lifted_columns, bucket_jobs))
+
+        return sub_groups
+
+    def _is_partition_predicate(self, predicate: str) -> bool:
+        """Check if a predicate likely involves a partition column (heuristic).
+
+        Args:
+            predicate: SQL predicate string
+
+        Returns:
+            True if likely a partition filter
+        """
+        cols = self._parser.extract_columns_from_expression(predicate)
+        partition_keywords = {"date", "time", "ts", "timestamp", "day", "month", "year", "dt"}
+
+        for col in cols:
+            col_lower = col.lower()
+            # Check if column name contains any partition keyword
+            if any(kw in col_lower for kw in partition_keywords):
+                return True
+
+            # Also check for BigQuery pseudo-columns
+            if "_partition" in col_lower:
+                return True
+
+        return False
 
     def _calculate_impact_score(
         self,

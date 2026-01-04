@@ -170,12 +170,34 @@ class MVGeneratorService:
         # T071: Calculate signature hash from canonical MV SQL for idempotency
         base_table = self._get_primary_base_table(candidate)
 
+        # Determine shared predicates (locked) and lifted columns (T049, T050)
+        # Use candidate's rigorous analysis if available, else fallback to single-query recommendation
+        shared_predicates = (
+            candidate.locked_predicates
+            if candidate.locked_predicates is not None
+            else eligibility_result.recommended_mv_filters
+        )
+
+        group_by_expressions = list(eligibility_result.recommended_mv_group_by)
+        select_expressions = list(eligibility_result.recommended_mv_select)
+
+        if candidate.lifted_columns:
+            # Add lifted columns to GROUP BY and SELECT
+            for col in candidate.lifted_columns:
+                if col not in group_by_expressions:
+                    group_by_expressions.append(col)
+
+                # Check if column is already in SELECT (simple check)
+                # In production, this might need better parsing to handle aliases
+                if not any(col in expr for expr in select_expressions):
+                    select_expressions.append(col)
+
         # Build preliminary MV query for signature calculation
         preliminary_mv_query = self._build_mv_query(
-            select_expressions=eligibility_result.recommended_mv_select,
+            select_expressions=select_expressions,
             base_table=base_table,
-            shared_predicates=eligibility_result.recommended_mv_filters,
-            group_by_expressions=eligibility_result.recommended_mv_group_by,
+            shared_predicates=shared_predicates,
+            group_by_expressions=group_by_expressions,
         )
 
         # T071: Calculate signature hash of canonical MV SQL
@@ -195,10 +217,10 @@ class MVGeneratorService:
             signature_hash=signature_hash_short,
             project=target_project,
             dataset=target_dataset,
-            select_expressions=eligibility_result.recommended_mv_select,
+            select_expressions=select_expressions,
             base_table=base_table,
-            shared_predicates=eligibility_result.recommended_mv_filters,
-            group_by_expressions=eligibility_result.recommended_mv_group_by,
+            shared_predicates=shared_predicates,
+            group_by_expressions=group_by_expressions,
             enable_refresh=enable_refresh,
             refresh_interval_minutes=refresh_interval_minutes,
             query_hash=candidate.query_hash,
