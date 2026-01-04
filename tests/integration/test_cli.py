@@ -190,6 +190,73 @@ class TestCLISmartTuningCheckCommand:
                 Path(sql_file).unlink(missing_ok=True)
 
 
+class TestCLIRunCommand:
+    """Test the run command."""
+
+    def test_run_command_non_interactive(self, mock_cli_bq_client):
+        """Test run command in non-interactive mode."""
+        # Mock query response for analysis
+        mock_cli_bq_client.query_information_schema_jobs.return_value = QueryResult(
+            rows=[
+                {
+                    "job_id": "job1",
+                    "query": "SELECT user_id, COUNT(*) FROM `test-project.dataset.events` GROUP BY user_id",
+                    "normalized_literals": "abc123",
+                    "total_bytes_billed": 10737418240,  # 10 GB
+                    "total_bytes_processed": 16106127360,
+                    "total_slot_ms": 5000000,
+                    "creation_time": datetime(2024, 1, 15, 12, 0, 0, tzinfo=UTC),
+                    "statement_type": "SELECT",
+                    "referenced_tables": [
+                        {
+                            "project_id": "test-project",
+                            "dataset_id": "dataset",
+                            "table_id": "events",
+                            "region": "US",
+                        }
+                    ],
+                },
+            ],
+            total_rows=1,
+        )
+
+        # Mock dataset/table existence for MV generation
+        mock_cli_bq_client.dataset_exists.return_value = True
+        mock_cli_bq_client.table_exists.return_value = False
+        mock_cli_bq_client.get_dataset_region.return_value = "US"
+
+        # Mock MV creation response
+        mock_cli_bq_client.create_materialized_view.return_value = MagicMock(job_id="job_create_mv")
+
+        with patch("bigquery_automv.cli.commands.run.BigQueryClient", return_value=mock_cli_bq_client):
+            from bigquery_automv.cli.app import app
+
+            try:
+                app(
+                    [
+                        "run",
+                        "--start-date",
+                        "2024-01-01",
+                        "--min-executions",
+                        "1",
+                        "--project",
+                        "test-project",
+                        "--yes",  # Non-interactive
+                        "--dataset",
+                        "target_dataset",
+                    ],
+                )
+            except SystemExit as e:
+                if e.code != 0:
+                    raise
+
+        # Verify analysis was run
+        mock_cli_bq_client.query_information_schema_jobs.assert_called()
+
+        # Verify MV creation was attempted
+        mock_cli_bq_client.create_materialized_view.assert_called()
+
+
 class TestCLIGenerateMVCommand:
     """Test CLI generate-mv command."""
 

@@ -5,6 +5,7 @@ from bigquery_automv.cli.commands import (
     generate_mv,
     impact,
     report,
+    run,
     smart_tuning_check,
 )
 
@@ -13,5 +14,6 @@ __all__ = [
     "generate_mv",
     "impact",
     "report",
+    "run",
     "smart_tuning_check",
 ]
