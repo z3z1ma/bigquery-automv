@@ -6,17 +6,66 @@ authors = [
     { name = "z3z1ma", email = "butler.alex2010@gmail.com" }
 ]
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "aiohttp>=3.13.3",
+    "cyclopts>=4.4.3",
+    "google-cloud-bigquery>=3.39.0",
+    "sqlglot>=28.5.0",
+    "tqdm>=4.67.1",
+]
 
 [project.scripts]
-bigquery-automv = "bigquery_automv:main"
+bq-automv = "bigquery_automv.cli.app:main"
 
 [build-system]
-requires = ["uv_build>=0.9.16,<0.10.0"]
-build-backend = "uv_build"
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
 
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
+    "pytest-asyncio>=0.25.0",
     "ruff>=0.14.10",
+    "mypy>=1.14.0",
+    "pre-commit>=4.0.0",
 ]
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.14"
+warn_return_any = false
+warn_unused_configs = false
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = false
+no_implicit_optional = true
+warn_redundant_casts = false
+warn_unused_ignores = false
+warn_no_return = true
+strict_equality = false
+
+[[tool.mypy.overrides]]
+module = [
+    "cyclopts.*",
+    "google.cloud.*",
+    "sqlglot.*",
+    "tqdm.*",
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = [
+    "bigquery_automv.cli.commands.*",
+    "bigquery_automv.services.*",
+]
+ignore_errors = true
