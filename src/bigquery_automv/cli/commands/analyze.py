@@ -463,7 +463,7 @@ def format_and_output(result: AnalysisResult, output: Path | None, as_json: bool
         result: AnalysisResult from analyzer
         output: Optional output file path
         as_json: Whether to use JSON format (vs human-readable table)
-        include_query: Whether to include query text in output
+        include_query: Whether to include query text in output (table only)
     """
     # Determine output format
     if output:
@@ -475,9 +475,9 @@ def format_and_output(result: AnalysisResult, output: Path | None, as_json: bool
 
     # Format output
     if output_format == "json":
-        output_data = format_json(result, include_query)
+        output_data = format_json(result)
     elif output_format == "csv":
-        output_data = format_csv(result, include_query)
+        output_data = format_csv(result)
     else:
         output_data = format_table(result, include_query)
 
@@ -515,12 +515,11 @@ def detect_format_from_path(path: Path) -> str:
     raise ValueError(msg)
 
 
-def format_json(result: AnalysisResult, include_query: bool = False) -> str:
+def format_json(result: AnalysisResult) -> str:
     """Format analysis result as JSON.
 
     Args:
         result: AnalysisResult from analyzer
-        include_query: Whether to include query text
 
     Returns:
         JSON string
@@ -532,6 +531,7 @@ def format_json(result: AnalysisResult, include_query: bool = False) -> str:
     for candidate in result.candidates:
         candidate_dict = {
             "query_hash": candidate.query_hash,
+            "representative_query": candidate.representative_query,
             "execution_count": candidate.execution_count,
             "bytes_billed_total": candidate.bytes_billed_total,
             "total_bytes_processed": candidate.total_bytes_processed,
@@ -555,9 +555,6 @@ def format_json(result: AnalysisResult, include_query: bool = False) -> str:
             "smart_tuning_eligible": candidate.smart_tuning_eligible,
             "eligibility_basis": candidate.eligibility_basis,
         }
-
-        if include_query:
-            candidate_dict["representative_query"] = candidate.representative_query
 
         if candidate.smart_tuning_reasons:
             candidate_dict["smart_tuning_reasons"] = candidate.smart_tuning_reasons
@@ -590,12 +587,11 @@ def format_json(result: AnalysisResult, include_query: bool = False) -> str:
     return json.dumps(output, indent=2)
 
 
-def format_csv(result: AnalysisResult, include_query: bool = False) -> str:
+def format_csv(result: AnalysisResult) -> str:
     """Format analysis result as CSV.
 
     Args:
         result: AnalysisResult from analyzer
-        include_query: Whether to include query text
 
     Returns:
         CSV string
@@ -619,6 +615,7 @@ def format_csv(result: AnalysisResult, include_query: bool = False) -> str:
     # Write header
     header = [
         "query_hash",
+        "representative_query",
         "execution_count",
         "total_bytes_billed",
         "smart_tuning_eligible",
@@ -628,15 +625,13 @@ def format_csv(result: AnalysisResult, include_query: bool = False) -> str:
         "referenced_tables",
     ]
 
-    if include_query:
-        header.append("representative_query")
-
     writer.writerow(header)
 
     # Write candidates
     for candidate in result.candidates:
         row = [
             candidate.query_hash,
+            candidate.representative_query,
             candidate.execution_count,
             candidate.bytes_billed_total,
             candidate.smart_tuning_eligible,
@@ -645,9 +640,6 @@ def format_csv(result: AnalysisResult, include_query: bool = False) -> str:
             round(candidate.dollar_cost_est_on_demand, 2),
             ",".join(t.full_name for t in candidate.referenced_tables),
         ]
-
-        if include_query:
-            row.append(candidate.representative_query)
 
         writer.writerow(row)
 
