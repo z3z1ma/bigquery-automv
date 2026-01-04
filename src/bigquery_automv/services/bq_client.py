@@ -147,6 +147,15 @@ class BigQueryClient:
             credentials=credentials,
         )
 
+    async def _run_blocking(self, func, *args, **kwargs):
+        """Run a blocking function in the default executor."""
+        import asyncio
+        import functools
+
+        loop = asyncio.get_running_loop()
+        partial_func = functools.partial(func, *args, **kwargs)
+        return await loop.run_in_executor(None, partial_func)
+
     @property
     def project_id(self) -> str:
         """Return the project ID."""
@@ -283,7 +292,8 @@ class BigQueryClient:
                 multiplier=2.0,
             )
 
-            job: QueryJob = self._client.query(
+            job: QueryJob = await self._run_blocking(
+                self._client.query,
                 sql,
                 job_config=job_config,
                 location=self._region,
@@ -291,7 +301,7 @@ class BigQueryClient:
             )
 
             # Wait for completion
-            result = job.result()
+            result = await self._run_blocking(job.result)
 
             rows = [dict(row) for row in result]
 
@@ -337,25 +347,40 @@ class BigQueryClient:
                 multiplier=2.0,
             )
 
-            job: QueryJob = self._client.query(
+            job: QueryJob = await self._run_blocking(
+                self._client.query,
                 sql,
                 location=self._region,
                 retry=retry_strategy,
             )
 
-            # Use iterator to fetch rows
-            row_iter = job.result(max_results=max_results)
+            # Get iterator (fetching first page might happen here or on first iteration)
+            # job.result() blocks until query completes and first page is available
+            row_iter = await self._run_blocking(job.result, max_results=max_results)
 
-            batch: list[dict] = []
-            for row in row_iter:
-                batch.append(dict(row))
-                if len(batch) >= batch_size:
+            # Use pages iterator to fetch pages asynchronously
+            pages_iter = iter(row_iter.pages)
+
+            while True:
+                try:
+                    # Fetch next page in executor to avoid blocking on network I/O
+                    page = await self._run_blocking(next, pages_iter)
+                except StopIteration:
+                    break
+
+                batch: list[dict] = []
+                for row in page:
+                    batch.append(dict(row))
+                    if len(batch) >= batch_size:
+                        yield batch
+                        batch = []
+
+                # Yield any remaining rows in current page if they fill a batch
+                # Note: This logic splits pages into batches. If a page is huge,
+                # the loop above might still block slightly for dict conversion,
+                # but network I/O is offloaded.
+                if batch:
                     yield batch
-                    batch = []
-
-            # Yield remaining rows
-            if batch:
-                yield batch
 
     async def dataset_exists(self, dataset_id: str, *, project_id: str | None = None) -> bool:
         """Check if a dataset exists.
@@ -370,7 +395,7 @@ class BigQueryClient:
         project = project_id or self._project_id
         try:
             async with self._execute_with_retry("dataset existence check"):
-                self._client.get_dataset(f"{project}.{dataset_id}")
+                await self._run_blocking(self._client.get_dataset, f"{project}.{dataset_id}")
                 return True
         except NotFound:
             return False
@@ -389,7 +414,7 @@ class BigQueryClient:
         """
         try:
             async with self._execute_with_retry("table existence check"):
-                self._client.get_table(table.full_name)
+                await self._run_blocking(self._client.get_table, table.full_name)
                 return True
         except NotFound:
             return False
@@ -413,7 +438,7 @@ class BigQueryClient:
         """
         project = project_id or self._project_id
         async with self._execute_with_retry("get dataset region"):
-            dataset = self._client.get_dataset(f"{project}.{dataset_id}")
+            dataset = await self._run_blocking(self._client.get_dataset, f"{project}.{dataset_id}")
             return dataset.location
 
     async def get_table_region(self, table: TableIdentifier) -> str:
@@ -613,7 +638,7 @@ class BigQueryClient:
         full_mv_name = f"{project}.{dataset_id}.{mv_name}"
 
         async with self._execute_with_retry("get materialized view"):
-            table = self._client.get_table(full_mv_name)
+            table = await self._run_blocking(self._client.get_table, full_mv_name)
 
             return {
                 "view_name": table.full_name,
