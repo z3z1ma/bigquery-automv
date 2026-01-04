@@ -421,6 +421,23 @@ class BigQueryClient:
         except PermissionError:
             return False
 
+    async def get_table_type(self, table: TableIdentifier) -> str:
+        """Get the type of a table (TABLE, VIEW, MATERIALIZED_VIEW).
+
+        Args:
+            table: Table identifier
+
+        Returns:
+            Table type string
+
+        Raises:
+            NotFoundError: If table doesn't exist
+            PermissionError: If lacking permissions
+        """
+        async with self._execute_with_retry("get table type"):
+            table_obj = await self._run_blocking(self._client.get_table, table.full_name)
+            return table_obj.table_type
+
     async def get_dataset_region(self, dataset_id: str, *, project_id: str | None = None) -> str:
         """Get the location/region of a dataset.
 

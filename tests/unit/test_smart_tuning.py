@@ -521,3 +521,45 @@ class TestOptimizationValue:
             target_project="project",
         )
         assert result.eligible is True
+
+
+class TestLogicalViewDetection:
+    """Test detection of logical view references."""
+
+    @pytest.mark.asyncio
+    async def test_ineligible_logical_view(self, mock_bq_client):
+        """Test that referencing a logical view makes query ineligible."""
+        # Mock get_table_type to return VIEW
+        mock_bq_client.get_table_type = AsyncMock(return_value="VIEW")
+
+        service = SmartTuningService(bq_client=mock_bq_client)
+        sql = "SELECT * FROM `project.dataset.view`"
+
+        result = await service.check_elibility(
+            sql=sql,
+            query_hash="test_hash",
+            target_dataset="dataset",
+            target_project="project",
+        )
+
+        assert result.eligible is False
+        assert any("logical view" in r for r in result.disqualification_reasons)
+
+    @pytest.mark.asyncio
+    async def test_eligible_base_table(self, mock_bq_client):
+        """Test that referencing a base table is eligible."""
+        # Mock get_table_type to return TABLE
+        mock_bq_client.get_table_type = AsyncMock(return_value="TABLE")
+
+        service = SmartTuningService(bq_client=mock_bq_client)
+        # Use DISTINCT to pass optimization value check
+        sql = "SELECT DISTINCT col FROM `project.dataset.table`"
+
+        result = await service.check_elibility(
+            sql=sql,
+            query_hash="test_hash",
+            target_dataset="dataset",
+            target_project="project",
+        )
+
+        assert result.eligible is True
