@@ -13,6 +13,7 @@ from bigquery_automv.lib.logging import get_logger
 from bigquery_automv.models.query_candidate import QueryCandidate, TableReference
 from bigquery_automv.services.bq_client import BigQueryClient
 from bigquery_automv.services.smart_tuning import SmartTuningService
+from bigquery_automv.services.sql_parser import SQLParseError, SQLParser
 
 
 @dataclass
@@ -79,6 +80,7 @@ class AnalyzerService:
         self._impact_config = impact_config or ImpactScoringConfig()
         self._analysis_config = analysis_config or AnalysisConfig()
         self._logger = get_logger("analyzer")
+        self._parser = SQLParser()
 
     async def analyze(
         self,
@@ -344,6 +346,23 @@ class AnalyzerService:
                 default=datetime.now(),
             )
 
+            # Extract query features
+            has_aggregations = False
+            aggregation_functions: list[str] = []
+            join_types: list[str] = []
+            has_ctes = False
+
+            try:
+                if representative_query:
+                    ast = self._parser.parse_query(representative_query)
+                    has_aggregations = self._parser.is_aggregate_query(ast)
+                    aggregation_functions = self._parser.get_aggregation_functions(ast)
+                    join_types = self._parser.get_join_types(ast)
+                    has_ctes = self._parser.has_ctes(ast)
+            except SQLParseError as e:
+                # Log warning but continue with defaults
+                self._logger.debug(f"Failed to parse query features for hash {query_hash}: {e}")
+
             # Determine Smart Tuning eligibility
             smart_tuning_eligible = False
             eligibility_basis = "stable"
@@ -380,6 +399,10 @@ class AnalyzerService:
                 last_seen=last_seen,
                 referenced_tables=referenced_tables,
                 statement_type=representative_job.get("statement_type", "SELECT"),
+                has_aggregations=has_aggregations,
+                aggregation_functions=aggregation_functions,
+                join_types=join_types,
+                has_ctes=has_ctes,
                 smart_tuning_eligible=smart_tuning_eligible,
                 eligibility_basis=eligibility_basis,
                 smart_tuning_reasons=smart_tuning_reasons,
