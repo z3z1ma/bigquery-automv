@@ -508,6 +508,18 @@ class SQLParser:
         agg_funcs = self.get_aggregation_functions(ast)
         return len(agg_funcs) > 0
 
+    def is_distinct_query(self, ast: exp.Expression) -> bool:
+        """Check if query uses SELECT DISTINCT.
+
+        Args:
+            ast: Parsed SQL AST
+
+        Returns:
+            True if DISTINCT is used
+        """
+        select = ast.find(exp.Select)
+        return bool(select and select.args.get("distinct"))
+
     def has_having_clause(self, ast: exp.Expression) -> bool:
         """
         Check if query has HAVING clause.

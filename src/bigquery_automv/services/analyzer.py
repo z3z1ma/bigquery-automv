@@ -356,6 +356,7 @@ class AnalyzerService:
 
                 # Extract query features from representative query
                 has_aggregations = False
+                has_distinct = False
                 aggregation_functions: list[str] = []
                 join_types: list[str] = []
                 has_ctes = False
@@ -364,6 +365,7 @@ class AnalyzerService:
                     if representative_query:
                         ast = self._parser.parse_query(representative_query)
                         has_aggregations = self._parser.is_aggregate_query(ast)
+                        has_distinct = self._parser.is_distinct_query(ast)
                         aggregation_functions = self._parser.get_aggregation_functions(ast)
                         join_types = self._parser.get_join_types(ast)
                         has_ctes = self._parser.has_ctes(ast)
@@ -391,6 +393,22 @@ class AnalyzerService:
                     if not eligibility_result.eligible:
                         smart_tuning_reasons.extend(eligibility_result.disqualification_reasons)
 
+                # Check for Identity MV (Shift Left)
+                # If no locked predicates AND no aggregation AND no distinct AND no CTEs/Joins -> Identity
+                if smart_tuning_eligible:
+                    is_identity = (
+                        not has_aggregations
+                        and not has_distinct
+                        and not locked_predicates
+                        and not has_ctes
+                        and not join_types
+                    )
+                    if is_identity:
+                        smart_tuning_eligible = False
+                        smart_tuning_reasons.append(
+                            "Resulting MV would be an Identity MV (all predicates lifted, no aggregation/distinct)"
+                        )
+
                 candidate = QueryCandidate(
                     query_hash=sub_hash,
                     representative_query=representative_query,
@@ -410,6 +428,7 @@ class AnalyzerService:
                     aggregation_functions=aggregation_functions,
                     join_types=join_types,
                     has_ctes=has_ctes,
+                    has_distinct=has_distinct,
                     locked_predicates=locked_predicates,
                     lifted_columns=lifted_columns,
                     smart_tuning_eligible=smart_tuning_eligible,

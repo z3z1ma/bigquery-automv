@@ -115,6 +115,7 @@ class QueryCandidate:
     aggregation_functions: list[str] = field(default_factory=list)
     join_types: list[str] = field(default_factory=list)
     has_ctes: bool = False
+    has_distinct: bool = False
     has_unsupported_patterns: bool = False
 
     # MV Strategy (T049, T050)
@@ -223,6 +224,7 @@ class QueryCandidate:
             aggregation_functions=parse_list("aggregation_functions"),
             join_types=parse_list("join_types"),
             has_ctes=data.get("has_ctes", False),
+            has_distinct=data.get("has_distinct", False),
             locked_predicates=parse_list("locked_predicates"),
             lifted_columns=parse_list("lifted_columns"),
             smart_tuning_eligible=data.get("smart_tuning_eligible", False),
