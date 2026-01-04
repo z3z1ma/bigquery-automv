@@ -27,7 +27,6 @@ class CommonConfig:
     json: Annotated[bool, Parameter(name="--json", negative="")] = False
     enable_preview_eligibility: Annotated[bool, Parameter(name="--enable-preview-eligibility", negative="")] = False
     include_user_email: Annotated[bool, Parameter(name="--include-user-email", negative="")] = False
-    include_query_text: Annotated[bool, Parameter(name="--include-query-text", negative="")] = False
 
 
 app = App(
