@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Self
 
 
 @dataclass(frozen=True)
@@ -146,3 +147,86 @@ class QueryCandidate:
         # Derive has_aggregations from aggregation_functions
         if self.aggregation_functions and not self.has_aggregations:
             object.__setattr__(self, "has_aggregations", True)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Self:
+        """Create QueryCandidate from dictionary (e.g. from JSON or BigQuery row).
+
+        Handles nested structures like referenced_tables and type conversions.
+        """
+        import json
+        from datetime import datetime
+
+        # Handle referenced_tables
+        referenced_tables = []
+        tables_data = data.get("referenced_tables", [])
+        if isinstance(tables_data, str):
+            try:
+                tables_data = json.loads(tables_data)
+            except json.JSONDecodeError:
+                tables_data = []
+
+        if tables_data:
+            for table_data in tables_data:
+                # Handle flat dict or nested structure
+                referenced_tables.append(
+                    TableReference(
+                        project_id=table_data.get("project_id", ""),
+                        dataset_id=table_data.get("dataset_id", ""),
+                        table_id=table_data.get("table_id", ""),
+                        region=table_data.get("region", "US"),  # Default to US if missing
+                        processed_bytes=table_data.get("processed_bytes"),
+                    )
+                )
+
+        # Handle timestamps
+        def parse_ts(val):
+            if isinstance(val, datetime):
+                return val
+            if isinstance(val, str):
+                try:
+                    return datetime.fromisoformat(val.replace("Z", "+00:00"))
+                except ValueError:
+                    pass
+            return datetime.now()  # Fallback
+
+        # Handle lists that might be JSON strings or None
+        def parse_list(key):
+            val = data.get(key)
+            if val is None:
+                return []
+            if isinstance(val, list):
+                return val
+            if isinstance(val, str):
+                try:
+                    return json.loads(val)
+                except json.JSONDecodeError:
+                    return []
+            return []
+
+        return cls(
+            query_hash=data["query_hash"],
+            representative_query=data.get("representative_query", ""),
+            execution_count=data.get("execution_count", 0),
+            bytes_billed_total=data.get("bytes_billed_total", 0),
+            total_bytes_processed=data.get("total_bytes_processed", 0),
+            slot_ms_total=data.get("slot_ms_total", 0),
+            impact_score=data.get("impact_score", 0.0),
+            dollar_cost_est_on_demand=data.get("dollar_cost_est_on_demand", 0.0),
+            impact_model_version=data.get("impact_model_version", "v1.0"),
+            rulebook_version=data.get("rulebook_version", "latest"),
+            first_seen=parse_ts(data.get("first_seen")),
+            last_seen=parse_ts(data.get("last_seen")),
+            referenced_tables=referenced_tables,
+            statement_type=data.get("statement_type", "SELECT"),
+            has_aggregations=data.get("has_aggregations", False),
+            aggregation_functions=parse_list("aggregation_functions"),
+            join_types=parse_list("join_types"),
+            has_ctes=data.get("has_ctes", False),
+            locked_predicates=parse_list("locked_predicates"),
+            lifted_columns=parse_list("lifted_columns"),
+            smart_tuning_eligible=data.get("smart_tuning_eligible", False),
+            eligibility_basis=data.get("eligibility_basis", "stable"),
+            smart_tuning_reasons=parse_list("smart_tuning_reasons"),
+            impacted_users=parse_list("impacted_users"),
+        )

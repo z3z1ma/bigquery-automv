@@ -365,7 +365,6 @@ async def _load_candidates_from_analyze(file_path: Path) -> dict[str, QueryCandi
         Dict mapping query_hash to QueryCandidate
     """
     import json
-    from datetime import datetime
 
     candidates: dict[str, QueryCandidate] = {}
 
@@ -377,41 +376,12 @@ async def _load_candidates_from_analyze(file_path: Path) -> dict[str, QueryCandi
         data = json.loads(file_path.read_text())
 
         for candidate_data in data.get("candidates", []):
-            # Reconstruct QueryCandidate from JSON
-            from bigquery_automv.services.bq_client import TableIdentifier
-
-            # Reconstruct referenced tables
-            referenced_tables = []
-            for table_data in candidate_data.get("referenced_tables", []):
-                referenced_tables.append(
-                    TableIdentifier(
-                        project_id=table_data["project_id"],
-                        dataset_id=table_data["dataset_id"],
-                        table_id=table_data["table_id"],
-                    )
-                )
-
-            candidate = QueryCandidate(
-                query_hash=candidate_data["query_hash"],
-                representative_query=candidate_data.get("representative_query", ""),
-                execution_count=candidate_data["execution_count"],
-                bytes_billed_total=candidate_data["bytes_billed_total"],
-                total_bytes_processed=candidate_data.get("total_bytes_processed", 0),
-                slot_ms_total=candidate_data.get("slot_ms_total", 0),
-                impact_score=candidate_data.get("impact_score", 0.0),
-                dollar_cost_est_on_demand=candidate_data.get("dollar_cost_est_on_demand", 0.0),
-                impact_model_version=candidate_data.get("impact_model_version", "v1.0"),
-                rulebook_version=candidate_data.get("rulebook_version", "latest"),
-                statement_type=candidate_data.get("statement_type", "SELECT"),
-                first_seen=datetime.fromisoformat(candidate_data["first_seen"]),
-                last_seen=datetime.fromisoformat(candidate_data["last_seen"]),
-                referenced_tables=referenced_tables,
-                smart_tuning_eligible=candidate_data.get("smart_tuning_eligible", True),
-                eligibility_basis=candidate_data.get("eligibility_basis", ""),
-                smart_tuning_reasons=candidate_data.get("smart_tuning_reasons"),
-            )
-
-            candidates[candidate.query_hash] = candidate
+            try:
+                candidate = QueryCandidate.from_dict(candidate_data)
+                candidates[candidate.query_hash] = candidate
+            except Exception as e:
+                logger.warning(f"Failed to parse candidate from file: {e}")
+                continue
 
         logger.info(f"Loaded {len(candidates)} candidates from {file_path}")
 
@@ -440,8 +410,6 @@ async def _load_candidates_from_table(
     Returns:
         Dict mapping query_hash to QueryCandidate
     """
-    from datetime import datetime
-
     candidates: dict[str, QueryCandidate] = {}
 
     try:
@@ -468,46 +436,12 @@ ORDER BY impact_score DESC"""
 
             # Reconstruct QueryCandidate objects
             for row in result.rows:
-                # Parse referenced_tables from JSON
-                import json
-
-                from bigquery_automv.services.bq_client import TableIdentifier
-
-                referenced_tables = []
-                tables_data = row.get("referenced_tables")
-                if isinstance(tables_data, str):
-                    tables_data = json.loads(tables_data)
-                if tables_data:
-                    for table_data in tables_data:
-                        referenced_tables.append(
-                            TableIdentifier(
-                                project_id=table_data["project_id"],
-                                dataset_id=table_data["dataset_id"],
-                                table_id=table_data["table_id"],
-                            )
-                        )
-
-                candidate = QueryCandidate(
-                    query_hash=row["query_hash"],
-                    representative_query=row.get("representative_query", ""),
-                    execution_count=row["execution_count"],
-                    bytes_billed_total=row["bytes_billed_total"],
-                    total_bytes_processed=row.get("total_bytes_processed", 0),
-                    slot_ms_total=row.get("slot_ms_total", 0),
-                    impact_score=row.get("impact_score", 0.0),
-                    dollar_cost_est_on_demand=row.get("dollar_cost_est_on_demand", 0.0),
-                    impact_model_version=row.get("impact_model_version", "v1.0"),
-                    rulebook_version=row.get("rulebook_version", "latest"),
-                    statement_type=row.get("statement_type", "SELECT"),
-                    first_seen=datetime.fromisoformat(row["first_seen"]),
-                    last_seen=datetime.fromisoformat(row["last_seen"]),
-                    referenced_tables=referenced_tables,
-                    smart_tuning_eligible=row.get("smart_tuning_eligible", True),
-                    eligibility_basis=row.get("eligibility_basis", ""),
-                    smart_tuning_reasons=row.get("smart_tuning_reasons"),
-                )
-
-                candidates[candidate.query_hash] = candidate
+                try:
+                    candidate = QueryCandidate.from_dict(row)
+                    candidates[candidate.query_hash] = candidate
+                except Exception as e:
+                    logger.warning(f"Failed to parse candidate from table row: {e}")
+                    continue
 
             logger.info(f"Loaded {len(candidates)} candidates from {full_table_name}")
 
