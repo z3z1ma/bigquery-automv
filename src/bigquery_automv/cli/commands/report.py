@@ -203,22 +203,22 @@ def report(
         _write_output(output_text, output, common.json)
 
     except PermissionError as e:
-        logger.error("Permission error", message=str(e))
+        logger.error("Permission error", extra={"error": str(e)})
         _print_error(f"Permission denied: {e.message}", common.json, suggestion="Check IAM permissions for BigQuery")
         sys.exit(ExitCode.ERROR)
 
     except NotFoundError as e:
-        logger.error("Not found error", message=str(e))
+        logger.error("Not found error", extra={"error": str(e)})
         _print_error(f"Resource not found: {e.message}", common.json, suggestion="Verify the project and dataset exist")
         sys.exit(ExitCode.ERROR)
 
     except BigQueryError as e:
-        logger.error("BigQuery error", message=str(e))
+        logger.error("BigQuery error", extra={"error": str(e)})
         _print_error(f"BigQuery error: {e.message}", common.json)
         sys.exit(ExitCode.ERROR)
 
     except ValueError as e:
-        logger.error("Validation error", message=str(e))
+        logger.error("Validation error", extra={"error": str(e)})
         _print_error(f"Invalid input: {e}", common.json)
         sys.exit(ExitCode.ERROR)
 

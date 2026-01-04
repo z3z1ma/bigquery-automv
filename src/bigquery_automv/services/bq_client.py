@@ -158,21 +158,29 @@ class BigQueryClient:
         return self._region
 
     def _normalize_region(self, region: str) -> str:
-        """Normalize region name to BigQuery format.
+        """Normalize region name to BigQuery location format.
+
+        For the location parameter in queries, US/EU should not have a "region-" prefix.
+        Other regions like "asia-northeast1" are used as-is.
 
         Args:
-            region: Region name like "US", "eu", "region-us", "region-eu"
+            region: Region name like "US", "eu", "region-us", "region-eu", "asia-northeast1"
 
         Returns:
-            Normalized region name with "region-" prefix for INFORMATION_SCHEMA queries
+            Normalized region name for use as location parameter (e.g., "US", "EU", "ASIA-NORTHEAST1")
         """
-        region_upper = region.upper()
+        region_upper = region.upper().strip()
+
+        # Handle explicit "region-" prefix by stripping it for location
         if region_upper.startswith(self._REGION_PROJECT_PREFIX):
-            return region_upper
-        if region_upper in {"US", "EU"}:
-            # Single and multi-region use "region-" prefix
-            return f"{self._REGION_PROJECT_PREFIX}{region_upper.lower()}"
-        # Other regions like "asia-northeast1" don't use "region-" prefix
+            # "region-us" -> "US", "region-eu" -> "EU"
+            suffix = region_upper[len(self._REGION_PROJECT_PREFIX) :]
+            if suffix in {"US", "EU"}:
+                return suffix
+            # Keep other regions as-is (e.g., "region-asia-northeast1" -> "ASIA-NORTHEAST1")
+            return suffix
+
+        # US and EU multi-regions are used directly
         return region_upper
 
     def _get_region_for_information_schema(self) -> str:
@@ -184,7 +192,14 @@ class BigQueryClient:
         Returns:
             Region project name like "region-us" or "region-eu"
         """
-        return self._region
+        region_upper = self._region.upper()
+        # For US/EU multi-regions, add "region-" prefix for INFORMATION_SCHEMA
+        if region_upper in {"US", "EU"}:
+            return f"{self._REGION_PROJECT_PREFIX}{region_upper.lower()}"
+        # For other regions, add "region-" prefix if not already present
+        if not region_upper.startswith(self._REGION_PROJECT_PREFIX):
+            return f"{self._REGION_PROJECT_PREFIX}{region_upper.lower()}"
+        return region_upper.lower()
 
     @asynccontextmanager
     async def _execute_with_retry(self, operation_name: str) -> AsyncGenerator[None]:

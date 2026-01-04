@@ -30,32 +30,6 @@ class ExitCode:
     PARTIAL_SUCCESS = 2
 
 
-def _validate_region(region: str) -> str:
-    """Validate region parameter format (T033).
-
-    Args:
-        region: Region string to validate
-
-    Returns:
-        Normalized region string
-
-    Raises:
-        ValueError: If region format is invalid
-    """
-    region_upper = region.upper().strip()
-
-    # Valid region formats for INFORMATION_SCHEMA.JOBS
-    # Single and multi-region use "region-" prefix
-    # Other regions like "asia-northeast1" are also valid
-    if region_upper.startswith("REGION-"):
-        return region_upper
-    if region_upper in ("US", "EU"):
-        return f"REGION-{region_upper.lower()}"
-
-    # Allow other region formats
-    return region_upper
-
-
 async def _run_analysis(
     start_date: date,
     end_date: date,
@@ -79,9 +53,6 @@ async def _run_analysis(
         ValueError: If configuration is invalid
         BigQueryError: If query fails
     """
-    # Validate region (T033)
-    normalized_region = _validate_region(common.region)
-
     # Setup logging (T035)
     logger = setup_logging(common)
 
@@ -89,7 +60,7 @@ async def _run_analysis(
         "Starting BigQuery query analysis",
         extra={
             "project": common.project,
-            "region": normalized_region,
+            "region": common.region,
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
         },
@@ -103,7 +74,7 @@ async def _run_analysis(
     # Create BigQuery client
     async with BigQueryClient(
         project_id=common.project,
-        region=normalized_region,
+        region=common.region,
     ) as client:
         # Create analyzer service
         analyzer = AnalyzerService(
@@ -309,22 +280,22 @@ def analyze(
         )
 
     except PermissionError as e:
-        logger.error("Permission error", message=str(e))
+        logger.error("Permission error", extra={"error": str(e)})
         print_error(f"Permission denied: {e.message}", common.json, suggestion="Check IAM permissions for BigQuery")
         sys.exit(ExitCode.ERROR)
 
     except NotFoundError as e:
-        logger.error("Not found error", message=str(e))
+        logger.error("Not found error", extra={"error": str(e)})
         print_error(f"Resource not found: {e.message}", common.json, suggestion="Verify the project and dataset exist")
         sys.exit(ExitCode.ERROR)
 
     except BigQueryError as e:
-        logger.error("BigQuery error", message=str(e))
+        logger.error("BigQuery error", extra={"error": str(e)})
         print_error(f"BigQuery error: {e.message}", common.json)
         sys.exit(ExitCode.ERROR)
 
     except ValueError as e:
-        logger.error("Validation error", message=str(e))
+        logger.error("Validation error", extra={"error": str(e)})
         print_error(f"Invalid input: {e}", common.json)
         sys.exit(ExitCode.ERROR)
 

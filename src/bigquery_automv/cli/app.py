@@ -18,7 +18,7 @@ class CommonConfig:
     project: Annotated[str, Parameter(name="--project", env_var=["GOOGLE_CLOUD_PROJECT", "BQ_AUTOMV_PROJECT"])] = field(
         default_factory=lambda: os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("BQ_AUTOMV_PROJECT") or ""
     )
-    region: Annotated[str, Parameter(name="--region", env_var=["BQ_AUTOMV_REGION"])] = "region-us"
+    region: Annotated[str, Parameter(name="--region", env_var=["BQ_AUTOMV_REGION"])] = "US"
     dataset: Annotated[str, Parameter(name="--dataset", env_var=["BQ_AUTOMV_DATASET"])] = field(
         default_factory=lambda: os.getenv("BQ_AUTOMV_DATASET") or ""
     )
@@ -40,12 +40,6 @@ app = App(
 def main() -> None:
     """Main entry point for the CLI."""
     # Import commands here to register them with the app
-    from bigquery_automv.cli.commands import (  # noqa: F401
-        analyze,
-        generate_mv,
-        impact,
-        report,
-        smart_tuning_check,
-    )
+    import bigquery_automv.cli.commands as _commands  # noqa: F401
 
     app()
