@@ -58,11 +58,19 @@ uv run bq-automv --help
 Analyze query history to find the most costly query patterns:
 
 ```bash
-uv run bq-automv analyze \
+# Basic analysis (uses last 30 days by default)
+bq-automv analyze 2024-01-01
+
+# Full analysis with custom parameters
+bq-automv analyze \
   --start-date 2024-01-01 \
   --end-date 2024-01-31 \
   --min-executions 20 \
+  --min-bytes 1073741824 \
   --output candidates.json
+
+# With project override
+bq-automv analyze 2024-01-01 --project my-project
 ```
 
 **What it does**:
@@ -92,10 +100,20 @@ uv run bq-automv analyze \
 Get financial projections for optimization candidates:
 
 ```bash
-uv run bq-automv report \
-  abc123... def456... \
+# Generate report for specific query hashes
+bq-automv report --query-hashes abc123... def456... \
   --format markdown \
   --price-per-tib 6.25
+
+# Read hashes from file (one per line)
+bq-automv report --from-file eligible_hashes.txt \
+  --format json \
+  --output report.json
+
+# Using date range instead of days lookback
+bq-automv report abc123... \
+  --start-date 2024-01-01 \
+  --end-date 2024-01-31
 ```
 
 **What it does**:
@@ -122,7 +140,11 @@ uv run bq-automv report \
 Verify if a query can benefit from automatic MV routing:
 
 ```bash
-uv run bq-automv smart-tuning-check --sql "
+# Check from file
+bq-automv smart-tuning-check --sql-file query.sql --verbose
+
+# Check inline SQL
+bq-automv smart-tuning-check --sql "
   SELECT
     DATE_TRUNC(transaction_date, MONTH) AS month,
     store_id,
@@ -131,6 +153,11 @@ uv run bq-automv smart-tuning-check --sql "
   WHERE region = 'US'
   GROUP BY 1, 2
 " --verbose
+
+# With target dataset for region validation
+bq-automv smart-tuning-check --sql-file query.sql \
+  --target-dataset analytics_mvs \
+  --target-project my-project
 ```
 
 **What it does**:
@@ -161,16 +188,30 @@ Recommended MV:
 Create MVs for eligible queries:
 
 ```bash
-# Dry run first
-uv run bq-automv generate-mv \
-  abc123... \
-  --dry-run
+# Dry run first (inspect DDL without deploying)
+bq-automv generate-mv abc123... --dry-run
 
-# Deploy for real
-uv run bq-automv generate-mv \
-  abc123... \
+# Deploy with defaults
+bq-automv generate-mv abc123... \
   --dataset analytics_mvs \
-  --refresh-interval-minutes 60 \
+  --yes
+
+# Deploy with custom refresh interval
+bq-automv generate-mv abc123... \
+  --dataset analytics_mvs \
+  --refresh-interval-minutes 1440 \
+  --enable-refresh \
+  --yes
+
+# Deploy with preview eligibility features
+bq-automv generate-mv abc123... \
+  --dataset analytics_mvs \
+  --enable-preview-eligibility \
+  --yes
+
+# Generate for multiple hashes
+bq-automv generate-mv --from-file eligible_hashes.txt \
+  --dataset analytics_mvs \
   --yes
 ```
 
@@ -205,10 +246,30 @@ Measure actual savings after MV deployment:
 ```bash
 # Wait 7 days for queries to use the MV
 
-uv run bq-automv impact \
+# Basic impact report
+bq-automv impact \
   --start-date 2024-01-15 \
-  --baseline 2024-01-01 \
+  --end-date 2024-01-22 \
   --format markdown
+
+# With explicit baseline comparison
+bq-automv impact \
+  --start-date 2024-01-15 \
+  --end-date 2024-01-22 \
+  --baseline-mode explicit_range \
+  --baseline-start 2024-01-01 \
+  --baseline-end 2024-01-07
+
+# With automatic previous period baseline
+bq-automv impact \
+  --start-date 2024-01-15 \
+  --end-date 2024-01-22 \
+  --baseline-mode previous_period
+
+# Filter by specific MV name
+bq-automv impact \
+  --start-date 2024-01-15 \
+  --mv-name automv_abc123_def456
 ```
 
 **What it does**:
@@ -244,7 +305,7 @@ export BQ_AUTOMV_REGION=region-us
 
 Now commands become:
 ```bash
-bq-automv analyze --start-date 2024-01-01
+bq-automv analyze 2024-01-01
 # No need to specify --project, --dataset, --region
 ```
 
@@ -268,14 +329,20 @@ bq-automv report --from-file eligible_hashes.txt \
   --format markdown > cost_report.md
 
 # 4. Review DDL before deploying
-bq-automv generate-mv --from-file eligible_hashes.txt --dry-run > mv_ddl.sql
+bq-automv generate-mv --from-file eligible_hashes.txt \
+  --dry-run > mv_ddl.sql
 
 # 5. Deploy MVs
-bq-automv generate-mv --from-file eligible_hashes.txt --yes
+bq-automv generate-mv --from-file eligible_hashes.txt \
+  --dataset analytics_mvs \
+  --yes
 
 # 6. Wait 7 days, then check impact
 sleep 7d
-bq-automv impact --start-date $(date -v-7d +%Y-%m-%d)
+bq-automv impact \
+  --start-date $(date -v-7d +%Y-%m-%d) \
+  --end-date $(date +%Y-%m-%d) \
+  --baseline-mode previous_period
 ```
 
 ---

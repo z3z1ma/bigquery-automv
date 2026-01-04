@@ -1,2 +1,10 @@
 # bv (beads viewer) local config and caches
 .bv/
+
+*.egg-info/
+__pycache__/
+
+.env
+.envrc
+
+.venv/
