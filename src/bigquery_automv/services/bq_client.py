@@ -28,6 +28,7 @@ from google.cloud.bigquery import (
 from google.cloud.bigquery.job import QueryJob
 
 from bigquery_automv.lib.region_utils import RegionHelper
+from bigquery_automv.lib.resources import get_sql_resource
 
 
 class BigQueryError(Exception):
@@ -650,39 +651,8 @@ class BigQueryClient:
         project = project_id or self._project_id
         full_table_name = f"{project}.{dataset_id}.{table_name}"
 
-        ddl = f"""CREATE TABLE IF NOT EXISTS {full_table_name} (
-  mv_name STRING,
-  source_query_hash STRING,
-  signature_hash STRING,
-  created_at TIMESTAMP,
-  base_tables ARRAY<STRUCT<
-    project_id STRING,
-    dataset_id STRING,
-    table_id STRING
-  >>,
-  project_id STRING,
-  dataset_id STRING,
-  mv_region STRING,
-  status STRING,
-  eligibility_basis STRING,
-  refresh_interval_minutes INT64,
-  ddl_definition STRING,
-  created_by_tool_version STRING,
-  rulebook_version STRING,
-  synthesis_version STRING,
-  synthesis_warnings ARRAY<STRING>,
-  last_refreshed TIMESTAMP,
-  usage_count INT64,
-  total_bytes_saved INT64,
-  total_slot_ms_saved INT64,
-  last_used TIMESTAMP
-)
-PARTITION BY TIMESTAMP_TRUNC(created_at, DAY)
-CLUSTER BY status
-OPTIONS (
-  partition_expiration_days = 365,
-  description = "BigQuery AutoMV metadata table for tracking materialized views"
-)"""
+        ddl_template = get_sql_resource("init_metadata_table.sql")
+        ddl = ddl_template.format(full_table_name=full_table_name)
 
         return await self.execute_ddl(ddl)
 
@@ -749,38 +719,8 @@ OPTIONS (
         project = project_id or self._project_id
         full_table_name = f"{project}.{dataset_id}.{table_name}"
 
-        ddl = f"""CREATE TABLE IF NOT EXISTS {full_table_name} (
-  query_hash STRING NOT NULL,
-  representative_query STRING,
-  execution_count INT64,
-  bytes_billed_total INT64,
-  total_bytes_processed INT64,
-  slot_ms_total INT64,
-  impact_score FLOAT64,
-  dollar_cost_est_on_demand FLOAT64,
-  impact_model_version STRING,
-  rulebook_version STRING,
-  statement_type STRING,
-  first_seen TIMESTAMP,
-  last_seen TIMESTAMP,
-  referenced_tables ARRAY<STRUCT<
-    project_id STRING,
-    dataset_id STRING,
-    table_id STRING,
-    region STRING,
-    full_name STRING
-  >>,
-  smart_tuning_eligible BOOL,
-  eligibility_basis STRING,
-  smart_tuning_reasons ARRAY<STRING>,
-  analysis_start_date TIMESTAMP,
-  analysis_end_date TIMESTAMP,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
-)
-CLUSTER BY smart_tuning_eligible, impact_score
-OPTIONS (
-  description = "BigQuery AutoMV query candidates from analysis"
-)"""
+        ddl_template = get_sql_resource("init_candidates_table.sql")
+        ddl = ddl_template.format(full_table_name=full_table_name)
 
         return await self.execute_ddl(ddl)
 
