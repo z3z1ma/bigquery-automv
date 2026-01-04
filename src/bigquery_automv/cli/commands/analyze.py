@@ -417,7 +417,7 @@ def analyze(
         )
 
         # Format and output results
-        format_and_output(result, output, common.json, common.include_query_text)
+        format_and_output(result, output, common.json)
 
         logger.info(
             "Analysis complete",
@@ -456,14 +456,13 @@ def analyze(
     sys.exit(exit_code)
 
 
-def format_and_output(result: AnalysisResult, output: Path | None, as_json: bool, include_query: bool = False) -> None:
+def format_and_output(result: AnalysisResult, output: Path | None, as_json: bool) -> None:
     """Format and output analysis results.
 
     Args:
         result: AnalysisResult from analyzer
         output: Optional output file path
         as_json: Whether to use JSON format (vs human-readable table)
-        include_query: Whether to include query text in output (table only)
     """
     # Determine output format
     if output:
@@ -479,7 +478,7 @@ def format_and_output(result: AnalysisResult, output: Path | None, as_json: bool
     elif output_format == "csv":
         output_data = format_csv(result)
     else:
-        output_data = format_table(result, include_query)
+        output_data = format_table(result)
 
     # Write to file or stdout
     if output:
@@ -646,12 +645,11 @@ def format_csv(result: AnalysisResult) -> str:
     return output.getvalue()
 
 
-def format_table(result: AnalysisResult, include_query: bool = False) -> str:
+def format_table(result: AnalysisResult) -> str:
     """Format analysis result as human-readable table.
 
     Args:
         result: AnalysisResult from analyzer
-        include_query: Whether to include query text
 
     Returns:
         Table string
@@ -710,14 +708,15 @@ def format_table(result: AnalysisResult, include_query: bool = False) -> str:
 
             lines.append(f"{i:<6} {hash_short:<12} {execs:<8} {bytes_billed:<16} {eligible:<10} {impact:<10}")
 
-            if include_query:
-                # Add query text on next line (truncated)
-                query_preview = (
-                    candidate.representative_query[:80] + "..."
-                    if len(candidate.representative_query) > 80
-                    else candidate.representative_query
-                )
-                lines.append(f"       Query: {query_preview}")
+            # Always show truncated query preview
+            query_preview = (
+                candidate.representative_query[:80] + "..."
+                if len(candidate.representative_query) > 80
+                else candidate.representative_query
+            )
+            # Remove newlines for table compactness
+            query_preview = query_preview.replace("\n", " ")
+            lines.append(f"       Query: {query_preview}")
 
         if len(result.candidates) > 10:
             lines.append(f"... and {len(result.candidates) - 10} more candidates")
