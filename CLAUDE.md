@@ -204,3 +204,10 @@ Use cases:
 - **Spec/plan review** - Validate approach, identify missing requirements
 - **ADR critique** - Challenge assumptions, suggest alternatives
 - **Test coverage** - Find gaps in test scenarios
+
+## Recent Changes
+- 001-bq-query-optimizer: Added Python 3.14+
+
+## Active Technologies
+- Python 3.14+ (001-bq-query-optimizer)
+- BigQuery tables (INFORMATION_SCHEMA.JOBS for analysis, metadata table for MV tracking) (001-bq-query-optimizer)
