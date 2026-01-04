@@ -480,3 +480,44 @@ class TestComputedAggregates:
         # Computed aggregates should be detected
         assert "COMPUTED AGGREGATES" in result.unsupported_features
         assert result.eligible is False
+
+
+class TestOptimizationValue:
+    """Test optimization value heuristics."""
+
+    @pytest.mark.asyncio
+    async def test_ineligible_simple_select(self, smart_tuning_service):
+        """Test that simple SELECT * is ineligible."""
+        sql = "SELECT * FROM `project.dataset.table`"
+        result = await smart_tuning_service.check_elibility(
+            sql=sql,
+            query_hash="test_hash",
+            target_dataset="dataset",
+            target_project="project",
+        )
+        assert result.eligible is False
+        assert any("optimization value" in r for r in result.disqualification_reasons)
+
+    @pytest.mark.asyncio
+    async def test_eligible_distinct(self, smart_tuning_service):
+        """Test that SELECT DISTINCT is eligible."""
+        sql = "SELECT DISTINCT user_id FROM `project.dataset.table`"
+        result = await smart_tuning_service.check_elibility(
+            sql=sql,
+            query_hash="test_hash",
+            target_dataset="dataset",
+            target_project="project",
+        )
+        assert result.eligible is True
+
+    @pytest.mark.asyncio
+    async def test_eligible_join(self, smart_tuning_service):
+        """Test that query with JOIN is eligible."""
+        sql = "SELECT t1.id, t2.val FROM `project.d.t1` t1 JOIN `project.d.t2` t2 ON t1.id = t2.id"
+        result = await smart_tuning_service.check_elibility(
+            sql=sql,
+            query_hash="test_hash",
+            target_dataset="dataset",
+            target_project="project",
+        )
+        assert result.eligible is True

@@ -187,6 +187,9 @@ class SmartTuningService:
         # Check for logical view references (T045)
         await self._detect_logical_view_references(ast, result)
 
+        # Check for optimization value (T047)
+        await self._check_optimization_value(ast, result)
+
         # Perform column analysis for predicate lifting (T051)
         await self._analyze_columns_for_predicate_lifting(ast, result)
 
@@ -204,6 +207,44 @@ class SmartTuningService:
                 result.eligible = False
 
         return result
+
+    async def _check_optimization_value(
+        self,
+        ast: exp.Expression,
+        result: SmartTuningCheckResult,
+    ) -> None:
+        """
+        Check if query has sufficient optimization value (T047).
+
+        Queries must have at least one of:
+        - Aggregations
+        - Joins
+        - CTEs
+        - DISTINCT
+        - UNION
+
+        Simple SELECT * queries are generally not worth materializing.
+
+        Args:
+            ast: Parsed SQL AST
+            result: Result object to update
+        """
+        has_aggregations = bool(result.aggregation_functions)
+        has_joins = bool(result.join_types)
+        has_ctes = result.has_ctes
+        has_union = bool(ast.find(exp.Union))
+
+        # Check for DISTINCT
+        has_distinct = False
+        select = ast.find(exp.Select)
+        if select and select.args.get("distinct"):
+            has_distinct = True
+
+        if not (has_aggregations or has_joins or has_ctes or has_distinct or has_union):
+            result.disqualification_reasons.append(
+                "Query lacks optimization value: No aggregations, joins, DISTINCT, UNION, or CTEs found. "
+                "Simple SELECT queries are generally not candidates for materialized views."
+            )
 
     async def _detect_unsupported_patterns(
         self,
