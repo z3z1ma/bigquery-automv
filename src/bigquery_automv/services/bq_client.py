@@ -502,6 +502,7 @@ class BigQueryClient:
         refresh_interval_minutes: int = 0,
         description: str | None = None,
         if_not_exists: bool = False,
+        labels: dict[str, str] | None = None,
     ) -> QueryResult:
         """Create a materialized view.
 
@@ -514,6 +515,7 @@ class BigQueryClient:
             refresh_interval_minutes: Refresh interval in minutes (0 = manual)
             description: Optional description
             if_not_exists: Use CREATE MATERIALIZED VIEW IF NOT EXISTS
+            labels: Optional labels to set on the MV
 
         Returns:
             QueryResult with execution metadata
@@ -531,6 +533,10 @@ class BigQueryClient:
             f"enable_refresh = {str(enable_refresh).lower()}",
             f"refresh_interval_minutes = {refresh_interval_minutes}",
         ]
+
+        if labels:
+            labels_str = ", ".join(f'"{k}" = "{v}"' for k, v in labels.items())
+            options.append(f"labels = ({labels_str})")
 
         ddl_parts = [
             "CREATE MATERIALIZED VIEW",
@@ -601,6 +607,10 @@ class BigQueryClient:
                 - last_refresh_time: datetime | None
                 - refresh_interval_minutes: int
                 - enable_refresh: bool
+                - labels: dict[str, str]
+                - num_bytes: int
+                - num_rows: int
+                - creation_time: datetime
 
         Raises:
             NotFoundError: If MV doesn't exist
@@ -621,10 +631,110 @@ class BigQueryClient:
                 if hasattr(table, "refresh_interval_minutes")
                 else None,
                 "enable_refresh": table.enable_refresh if hasattr(table, "enable_refresh") else None,
+                "labels": dict(table.labels) if table.labels else {},
                 "num_bytes": table.num_bytes,
                 "num_rows": table.num_rows,
                 "creation_time": table.created,
             }
+
+    async def list_materialized_views(
+        self,
+        dataset_id: str,
+        *,
+        project_id: str | None = None,
+        label_filter: dict[str, str] | None = None,
+    ) -> list[dict]:
+        """List materialized views in a dataset.
+
+        Args:
+            dataset_id: Dataset ID
+            project_id: Project ID (defaults to client's project)
+            label_filter: Optional label filter (e.g., {"automv_managed": "true"})
+
+        Returns:
+            List of dictionaries with MV metadata:
+                - project_id: str
+                - dataset_id: str
+                - table_id: str
+                - full_name: str
+                - query: str
+                - labels: dict[str, str]
+                - num_bytes: int
+                - num_rows: int
+                - creation_time: datetime
+
+        Raises:
+            PermissionError: If lacking permissions
+            NotFoundError: If dataset doesn't exist
+            BigQueryClientError: For other errors
+        """
+        project = project_id or self._project_id
+        dataset_ref = f"{project}.{dataset_id}"
+
+        async with self._execute_with_retry("list materialized views"):
+            # List all tables in the dataset
+            tables = await self._run_blocking(
+                self._client.list_tables,
+                dataset_ref,
+            )
+
+            # Filter for materialized views and apply label filter
+            mvs = []
+            for table_ref in tables:
+                if table_ref.table_type != "MATERIALIZED_VIEW":
+                    continue
+
+                # Get full table details including labels
+                table = await self._run_blocking(self._client.get_table, table_ref)
+
+                # Apply label filter if provided
+                if label_filter:
+                    table_labels = dict(table.labels) if table.labels else {}
+                    if not all(table_labels.get(k) == v for k, v in label_filter.items()):
+                        continue
+
+                mvs.append(
+                    {
+                        "project_id": table.project,
+                        "dataset_id": table.dataset_id,
+                        "table_id": table.table_id,
+                        "full_name": table.full_name,
+                        "query": table.view_query,
+                        "labels": dict(table.labels) if table.labels else {},
+                        "num_bytes": table.num_bytes,
+                        "num_rows": table.num_rows,
+                        "creation_time": table.created,
+                    }
+                )
+
+            return mvs
+
+    async def set_labels(
+        self,
+        table_name: str,
+        labels: dict[str, str],
+        *,
+        project_id: str | None = None,
+    ) -> None:
+        """Set labels on a table.
+
+        Args:
+            table_name: Table name (project.dataset.table or dataset.table)
+            labels: Labels to set
+            project_id: Project ID (defaults to client's project)
+
+        Raises:
+            PermissionError: If lacking permissions
+            NotFoundError: If table doesn't exist
+            BigQueryClientError: For other errors
+        """
+        project = project_id or self._project_id
+        full_name = f"{project}.{table_name}" if "." not in table_name or table_name.count(".") == 1 else table_name
+
+        async with self._execute_with_retry("set labels"):
+            table = await self._run_blocking(self._client.get_table, full_name)
+            table.labels = labels
+            await self._run_blocking(self._client.update_table, table, ["labels"])
 
     async def initialize_metadata_table(
         self,

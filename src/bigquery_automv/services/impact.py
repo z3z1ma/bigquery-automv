@@ -72,6 +72,91 @@ class ImpactService:
         self._impact_config = impact_config or ImpactScoringConfig()
         self._logger = get_logger("impact")
 
+    async def get_mv_usage_stats(
+        self,
+        mv_name: str,
+        days: int = 7,
+    ) -> dict:
+        """Get usage statistics for a specific materialized view.
+
+        Args:
+            mv_name: Materialized view name (e.g., "dataset.mv_name" or "project.dataset.mv_name")
+            days: Number of days to look back (default: 7)
+
+        Returns:
+            Dictionary with usage statistics:
+                - mv_name: str
+                - period_days: int
+                - query_count: int
+                - total_slot_ms: int
+                - total_bytes_processed: int
+                - first_used: datetime | None
+                - last_used: datetime | None
+
+        Raises:
+            BigQueryClientError: If query fails
+        """
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days)
+
+        self._logger.info(
+            "Getting MV usage stats",
+            extra={
+                "mv_name": mv_name,
+                "days": days,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+            },
+        )
+
+        # Extract table_id from mv_name
+        if mv_name.count(".") == 2:
+            # project.dataset.table
+            _, _, table_id = mv_name.split(".")
+        elif mv_name.count(".") == 1:
+            # dataset.table
+            _, table_id = mv_name.split(".")
+        else:
+            # table only
+            table_id = mv_name
+
+        result = await self._client.query_materialized_view_statistics(
+            start_date=start_date,
+            end_date=end_date,
+            mv_name=table_id,
+            chosen_only=False,  # Get all MV statistics, not just chosen
+        )
+
+        rows = result.rows or []
+
+        # Calculate statistics
+        query_count = len(rows)
+        total_slot_ms = sum(row.get("total_slot_ms", 0) or 0 for row in rows)
+        total_bytes_processed = sum(row.get("total_bytes_processed", 0) or 0 for row in rows)
+
+        # Find first and last usage
+        first_used = None
+        last_used = None
+
+        if rows:
+            # Sort by creation_time
+            sorted_rows = sorted(
+                rows,
+                key=lambda r: r.get("creation_time") or datetime.min,
+            )
+            first_used = sorted_rows[0].get("creation_time")
+            last_used = sorted_rows[-1].get("creation_time")
+
+        return {
+            "mv_name": mv_name,
+            "period_days": days,
+            "query_count": query_count,
+            "total_slot_ms": total_slot_ms,
+            "total_bytes_processed": total_bytes_processed,
+            "first_used": first_used.isoformat() if first_used else None,
+            "last_used": last_used.isoformat() if last_used else None,
+        }
+
     async def generate_impact_report(
         self,
         start_date: date,

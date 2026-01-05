@@ -1,28 +1,14 @@
 """CLI application entry point for bq-automv."""
 
 import os
-from dataclasses import dataclass
 
 import click
 
+from bigquery_automv.cli.config import CommonConfig
 from bigquery_automv.cli.io import OutputFormatter
 
 # Version metadata
 __version__ = "1.5.0"
-
-
-@dataclass
-class CommonConfig:
-    """Shared parameters for all commands."""
-
-    project: str
-    region: str
-    dataset: str
-    dry_run: bool
-    verbose: bool
-    json: bool
-    interactive: bool | None
-    include_query_text: bool = False
 
 
 @click.group()
@@ -97,18 +83,27 @@ def app(
     ctx.obj["formatter"] = OutputFormatter(json_mode=json, version=__version__)
 
 
-def main() -> None:
-    """Main entry point for the CLI."""
-    # Import command groups here to register them with the app
+def _register_commands() -> None:
+    """Register command groups with the app.
+
+    This is called lazily to avoid circular imports.
+    """
     from bigquery_automv.cli.commands import (  # noqa: F401
         candidates,
         mv,
         spec,
     )
 
-    # Add command groups to the app
-    app.add_command(candidates.candidates_group)
-    app.add_command(mv.mv_group)
-    app.add_command(spec.spec_command)
+    # Check if commands are already registered to avoid double registration
+    if "candidates" not in app.commands:
+        app.add_command(candidates.candidates_group)
+    if "mv" not in app.commands:
+        app.add_command(mv.mv_group)
+    if "spec" not in app.commands:
+        app.add_command(spec.spec_command)
 
+
+def main() -> None:
+    """Main entry point for the CLI."""
+    _register_commands()
     app()

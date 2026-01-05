@@ -6,7 +6,7 @@ import sys
 from datetime import datetime
 from typing import Any
 
-from bigquery_automv.cli.app import CommonConfig
+from bigquery_automv.cli.config import CommonConfig
 
 
 class JSONFormatter(logging.Formatter):
