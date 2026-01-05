@@ -1,19 +1,10 @@
 """Command modules for bq-automv CLI."""
 
-from bigquery_automv.cli.commands import (
-    analyze,
-    generate_mv,
-    impact,
-    report,
-    run,
-    smart_tuning_check,
-)
+# New command groups
+from bigquery_automv.cli.commands import candidates, mv, spec
 
 __all__ = [
-    "analyze",
-    "generate_mv",
-    "impact",
-    "report",
-    "run",
-    "smart_tuning_check",
+    "candidates",
+    "mv",
+    "spec",
 ]

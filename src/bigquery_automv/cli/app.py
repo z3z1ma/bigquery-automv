@@ -5,8 +5,10 @@ from dataclasses import dataclass
 
 import click
 
+from bigquery_automv.cli.io import OutputFormatter
+
 # Version metadata
-__version__ = "0.1.0"
+__version__ = "1.5.0"
 
 
 @dataclass
@@ -19,8 +21,7 @@ class CommonConfig:
     dry_run: bool
     verbose: bool
     json: bool
-    enable_preview_eligibility: bool
-    include_user_email: bool
+    interactive: bool | None
     include_query_text: bool = False
 
 
@@ -45,7 +46,7 @@ class CommonConfig:
 @click.option(
     "--dry-run",
     is_flag=True,
-    help="Dry run mode",
+    help="Dry run mode (show what would be done without making changes)",
 )
 @click.option(
     "--verbose",
@@ -56,17 +57,12 @@ class CommonConfig:
 @click.option(
     "--json",
     is_flag=True,
-    help="JSON output",
+    help="JSON envelope output (stdout = JSON only, stderr = logs)",
 )
 @click.option(
-    "--enable-preview-eligibility",
-    is_flag=True,
-    help="Enable preview features",
-)
-@click.option(
-    "--include-user-email",
-    is_flag=True,
-    help="Include user email in output",
+    "--interactive/--non-interactive",
+    default=None,
+    help="Force interactive/non-interactive mode (default: auto-detect)",
 )
 @click.pass_context
 def app(
@@ -77,26 +73,42 @@ def app(
     dry_run: bool,
     verbose: bool,
     json: bool,
-    enable_preview_eligibility: bool,
-    include_user_email: bool,
+    interactive: bool | None,
 ) -> None:
-    """BigQuery materialized view automation tool"""
+    """BigQuery materialized view automation tool.
+
+    Global options:
+    """
     ctx.ensure_object(dict)
-    ctx.obj["common"] = CommonConfig(
+
+    # Create CommonConfig
+    common = CommonConfig(
         project=project or os.getenv("GOOGLE_CLOUD_PROJECT") or "",
         region=region,
         dataset=dataset or "",
         dry_run=dry_run,
         verbose=verbose,
         json=json,
-        enable_preview_eligibility=enable_preview_eligibility,
-        include_user_email=include_user_email,
+        interactive=interactive,
     )
+    ctx.obj["common"] = common
+
+    # Create OutputFormatter for JSON envelope output
+    ctx.obj["formatter"] = OutputFormatter(json_mode=json, version=__version__)
 
 
 def main() -> None:
     """Main entry point for the CLI."""
-    # Import commands here to register them with the app
-    import bigquery_automv.cli.commands as _commands  # noqa: F401
+    # Import command groups here to register them with the app
+    from bigquery_automv.cli.commands import (  # noqa: F401
+        candidates,
+        mv,
+        spec,
+    )
+
+    # Add command groups to the app
+    app.add_command(candidates.candidates_group)
+    app.add_command(mv.mv_group)
+    app.add_command(spec.spec_command)
 
     app()
