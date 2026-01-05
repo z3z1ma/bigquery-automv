@@ -6,6 +6,7 @@ materialized views from query candidates.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import sys
@@ -274,6 +275,12 @@ def mv_plan(
     "action_filter",
     help="Filter actions to apply (e.g., 'create,replace')",
 )
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=None,
+    help="Dry run mode (show what would be done without making changes)",
+)
 @click.pass_context
 def mv_apply(
     ctx: click.Context,
@@ -281,10 +288,15 @@ def mv_apply(
     project_id: str,
     dataset_id: str,
     action_filter: str | None,
+    dry_run: bool | None = None,
 ) -> None:
     """Apply a materialized view plan."""
     common = _get_common_config(ctx)
     formatter = _get_formatter(ctx)
+
+    # Local --dry-run flag overrides global setting
+    if dry_run is not None:
+        common.dry_run = dry_run
 
     logger = setup_logging(common)
 
@@ -327,40 +339,145 @@ def mv_apply(
             "failed": [],
         }
 
-        # Note: This is a placeholder implementation
-        # In production, this would use MVGeneratorService to generate DDL
-        # and BigQueryClient to execute it
-
-        if not common.dry_run:
-            # TODO: Implement actual MV creation
-            # This requires:
-            # 1. MVGeneratorService to generate DDL
-            # 2. BigQueryClient.create_materialized_view() to execute
-            # 3. Label management for automv tracking
-
-            formatter.emit_warning("MV creation not yet implemented in production mode")
-            formatter.emit_warning("Use --dry-run to preview what would be created")
-
-        # For dry-run, show what would be created
+        # Process actions
         for action in actions:
             action_type = action["action"]
             mv_name = action.get("mv_name", "")
+            candidate = action.get("candidate", {})
 
-            if action_type == "create":
-                if common.dry_run:
-                    results["created"].append(f"{dataset_id}.{mv_name} (dry-run)")
-                    logger.info(f"Would create {dataset_id}.{mv_name}")
-                else:
-                    results["created"].append(f"{dataset_id}.{mv_name}")
-            elif action_type == "replace":
-                if common.dry_run:
-                    results["replaced"].append(f"{dataset_id}.{mv_name} (dry-run)")
-                    logger.info(f"Would replace {dataset_id}.{mv_name}")
-                else:
-                    results["replaced"].append(f"{dataset_id}.{mv_name}")
-            elif action_type == "skip":
+            if action_type == "skip":
                 results["skipped"].append(mv_name)
                 logger.info(f"Skipping {mv_name}")
+                continue
+
+            if action_type == "create" or action_type == "replace":
+                try:
+                    # In dry-run mode, just log what would be done
+                    if common.dry_run:
+                        if action_type == "create":
+                            results["created"].append(f"{dataset_id}.{mv_name} (dry-run)")
+                            logger.info(f"Would create {dataset_id}.{mv_name}")
+                        else:
+                            results["replaced"].append(f"{dataset_id}.{mv_name} (dry-run)")
+                            logger.info(f"Would replace {dataset_id}.{mv_name}")
+                        continue
+
+                    # Actual MV creation
+                    # Get services from context (they should be available via app initialization)
+                    from bigquery_automv.services.bq_client import BigQueryClient
+                    from bigquery_automv.services.mv_generator import MVGeneratorService
+                    from bigquery_automv.services.smart_tuning import SmartTuningService
+
+                    # Capture loop variables to avoid closure issues
+                    captured_candidate = candidate
+                    captured_action = action
+                    captured_mv_name = mv_name
+                    captured_action_type = action_type
+
+                    # Create async runner
+                    async def create_mv():  # noqa: B023
+                        # Initialize BigQuery client
+                        client = BigQueryClient(
+                            project_id=project_id,
+                            region=common.region,
+                        )
+
+                        # Initialize services
+                        smart_tuning_service = SmartTuningService(client=client)
+                        mv_generator = MVGeneratorService(
+                            bq_client=client,
+                            smart_tuning_service=smart_tuning_service,
+                            tool_version="1.5.0",
+                        )
+
+                        # Build candidate object
+                        from bigquery_automv.models.candidate import QueryCandidate
+
+                        query_candidate = QueryCandidate(
+                            query_hash=captured_candidate.get("query_hash", ""),  # noqa: B023
+                            representative_query=captured_candidate.get(  # noqa: B023
+                                "representative_query",
+                                "",
+                            ),
+                            execution_count=captured_candidate.get("execution_count", 0),  # noqa: B023
+                            total_bytes_billed=captured_candidate.get(  # noqa: B023
+                                "total_bytes_billed",
+                                0,
+                            ),
+                            total_slot_ms=captured_candidate.get("total_slot_ms", 0),  # noqa: B023
+                        )
+
+                        # Generate MV artifact
+                        mv_artifact = await mv_generator.generate_mv_artifact(
+                            candidate=query_candidate,
+                            target_dataset=dataset_id,
+                            target_project=project_id,
+                            mv_prefix="",
+                            refresh_interval_minutes=60,
+                            enable_refresh=True,
+                        )
+
+                        # Prepare labels
+                        labels = {
+                            "automv_managed": "true",
+                            "automv_family_hash": captured_action.get("family_hash", ""),  # noqa: B023
+                            "automv_signature_hash": captured_action.get(  # noqa: B023
+                                "signature_hash",
+                                "",
+                            ),
+                            "automv_version": "1.5.0",
+                        }
+
+                        # Strip "dataset." prefix from mv_name if present
+                        mv_short_name = captured_mv_name.replace(  # noqa: B023
+                            f"{dataset_id}.",
+                            "",
+                        )
+
+                        # Create or replace MV
+                        if captured_action_type == "replace":  # noqa: B023
+                            # Drop existing MV first
+                            await client.drop_materialized_view(
+                                mv_name=mv_short_name,
+                                dataset_id=dataset_id,
+                                project_id=project_id,
+                                if_exists=True,
+                            )
+
+                        # Create MV with labels
+                        await client.create_materialized_view(
+                            mv_name=mv_short_name,
+                            dataset_id=dataset_id,
+                            query=mv_artifact.ddl,
+                            project_id=project_id,
+                            enable_refresh=True,
+                            refresh_interval_minutes=60,
+                            labels=labels,
+                        )
+
+                        return mv_short_name
+
+                    # Run async function
+                    mv_short_name = asyncio.run(create_mv())
+
+                    if action_type == "create":
+                        results["created"].append(f"{dataset_id}.{mv_short_name}")
+                    else:
+                        results["replaced"].append(f"{dataset_id}.{mv_short_name}")
+
+                    action_verb = "created" if action_type == "create" else "replaced"
+                    logger.info(
+                        f"Successfully {action_verb} {dataset_id}.{mv_short_name}",
+                    )
+
+                except Exception as e:
+                    logger.exception(f"Failed to {action_type} {mv_name}: {e}")
+                    results["failed"].append(f"{dataset_id}.{mv_name}: {str(e)}")
+                    formatter.emit_warning(f"Failed to {action_type} {mv_name}: {e}")
+
+                    # In production mode, fail on first error?
+                    # For now, continue with remaining actions
+                    continue
 
         formatter.success(
             command="mv.apply",
