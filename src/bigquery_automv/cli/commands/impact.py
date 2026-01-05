@@ -1,16 +1,15 @@
-"""Impact command for materialized view usage reporting."""
+"Impact command for materialized view usage reporting."
 
 import asyncio
 import csv
 import json
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
-from typing import Annotated
 
-from cyclopts import Parameter
+import click
 
-from bigquery_automv.cli.app import CommonConfig, app
+from bigquery_automv.cli.app import app
 from bigquery_automv.lib.config import ImpactScoringConfig
 from bigquery_automv.lib.logging import setup_logging
 from bigquery_automv.models.impact_report import ImpactReport
@@ -38,28 +37,10 @@ async def _run_impact_analysis(
     baseline_start: date | None,
     baseline_end: date | None,
     mv_name_filter: str | None,
-    common: CommonConfig,
+    common: object,
     impact_config: ImpactScoringConfig,
 ) -> ImpactReport:
-    """Run the impact analysis asynchronously.
-
-    Args:
-        start_date: Start of analysis window
-        end_date: End of analysis window
-        baseline_mode: Baseline comparison mode
-        baseline_start: Baseline start date (for explicit_range mode)
-        baseline_end: Baseline end date (for explicit_range mode)
-        mv_name_filter: Optional MV name filter
-        common: Common configuration
-        impact_config: Impact scoring configuration
-
-    Returns:
-        ImpactReport
-
-    Raises:
-        ValueError: If configuration is invalid
-        BigQueryError: If query fails
-    """
+    """Run the impact analysis asynchronously."""
     # Setup logging
     logger = setup_logging(common)
 
@@ -103,81 +84,68 @@ async def _run_impact_analysis(
         return result
 
 
-@app.command
+@app.command()
+@click.option(
+    "--start-date",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    required=True,
+    help="Start of impact analysis period (YYYY-MM-DD format)",
+)
+@click.option(
+    "--end-date",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    default=str(date.today()),
+    help="End of impact analysis period (YYYY-MM-DD format)",
+)
+@click.option(
+    "--baseline-mode",
+    type=click.Choice(["none", "previous_period", "explicit_range"]),
+    default="none",
+    help="Baseline comparison mode",
+)
+@click.option(
+    "--baseline-start",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Baseline start (required when baseline_mode=explicit_range)",
+)
+@click.option(
+    "--baseline-end",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Baseline end (required when baseline_mode=explicit_range)",
+)
+@click.option(
+    "--mv-name",
+    help="Filter to specific MV name",
+)
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path),
+    help="Write results to file (JSON/Markdown/CSV)",
+)
+@click.option(
+    "--format",
+    type=click.Choice(["markdown", "json", "csv"]),
+    default="markdown",
+    help="Output format",
+)
+@click.option(
+    "--price-per-tib",
+    default=6.25,
+    help="BigQuery on-demand price per TiB for savings calculation",
+)
+@click.pass_context
 def impact(
-    start_date: Annotated[
-        date,
-        Parameter(
-            name="--start-date",
-            help="Start of impact analysis period (YYYY-MM-DD format)",
-        ),
-    ],
-    end_date: Annotated[
-        date,
-        Parameter(
-            name="--end-date",
-            help="End of impact analysis period (YYYY-MM-DD format)",
-        ),
-    ] = date.today(),  # noqa: B008
-    baseline_mode: Annotated[
-        str,
-        Parameter(
-            name="--baseline-mode",
-            help='Baseline mode: "none", "previous_period", "explicit_range"',
-        ),
-    ] = "none",
-    baseline_start: Annotated[
-        date | None,
-        Parameter(
-            name="--baseline-start",
-            help="Baseline start (required when baseline_mode=explicit_range)",
-        ),
-    ] = None,
-    baseline_end: Annotated[
-        date | None,
-        Parameter(
-            name="--baseline-end",
-            help="Baseline end (required when baseline_mode=explicit_range)",
-        ),
-    ] = None,
-    mv_name: Annotated[
-        str | None,
-        Parameter(
-            name="--mv-name",
-            help="Filter to specific MV name",
-        ),
-    ] = None,
-    output: Annotated[
-        Path | None,
-        Parameter(
-            name="--output",
-            help="Write results to file (JSON/Markdown/CSV)",
-            parse=lambda p: Path(p) if p else None,
-        ),
-    ] = None,
-    format: Annotated[
-        str,
-        Parameter(
-            name="--format",
-            help='Output format: "markdown", "json", "csv"',
-        ),
-    ] = "markdown",
-    price_per_tib: Annotated[
-        float,
-        Parameter(
-            name="--price-per-tib",
-            help="BigQuery on-demand price per TiB for savings calculation",
-        ),
-    ] = 6.25,
-    *,
-    common: Annotated[
-        CommonConfig | None,
-        Parameter(
-            name="*",
-            help="Common configuration options",
-        ),
-    ] = None,
-) -> str:
+    ctx: click.Context,
+    start_date: datetime,
+    end_date: datetime,
+    baseline_mode: str,
+    baseline_start: datetime | None,
+    baseline_end: datetime | None,
+    mv_name: str | None,
+    output: Path | None,
+    format: str,
+    price_per_tib: float,
+) -> None:
     """Report on materialized view usage and savings.
 
     Analyzes the effectiveness of deployed materialized views by tracking
@@ -195,40 +163,35 @@ def impact(
 
     Example:
         ```bash
-        bq-automv impact \\
-          --start-date 2024-01-01 \\
-          --end-date 2024-01-31 \\
-          --baseline-mode previous_period \\
+        bq-automv impact \
+          --start-date 2024-01-01 \
+          --end-date 2024-01-31 \
+          --baseline-mode previous_period \
           --format markdown
         ```
     """
-    if common is None:
-        common = CommonConfig()
+    common = ctx.obj["common"]
 
     # Set up logging
     logger = setup_logging(common)
     exit_code = ExitCode.SUCCESS
 
     try:
+        # Convert dates
+        start_date_obj = start_date.date()
+        end_date_obj = end_date.date()
+        baseline_start_obj = baseline_start.date() if baseline_start else None
+        baseline_end_obj = baseline_end.date() if baseline_end else None
+
         # Validate date range
-        if end_date < start_date:
+        if end_date_obj < start_date_obj:
             logger.error("End date must be on or after start date")
             print_error("Invalid date range: end_date must be on or after start_date", common.json)
             sys.exit(ExitCode.ERROR)
 
-        # Validate baseline mode
-        valid_baseline_modes = ["none", "previous_period", "explicit_range"]
-        if baseline_mode not in valid_baseline_modes:
-            logger.error("Invalid baseline mode")
-            print_error(
-                f"Invalid baseline_mode: {baseline_mode}. Must be one of: {', '.join(valid_baseline_modes)}",
-                common.json,
-            )
-            sys.exit(ExitCode.ERROR)
-
         # Validate explicit range parameters
         if baseline_mode == "explicit_range":
-            if not baseline_start or not baseline_end:
+            if not baseline_start_obj or not baseline_end_obj:
                 logger.error("baseline_start and baseline_end required for explicit_range mode")
                 print_error(
                     "baseline_start and baseline_end are required when baseline_mode is 'explicit_range'",
@@ -236,23 +199,13 @@ def impact(
                 )
                 sys.exit(ExitCode.ERROR)
 
-            if baseline_end < baseline_start:
+            if baseline_end_obj < baseline_start_obj:
                 logger.error("Baseline end date must be on or after baseline start date")
                 print_error(
                     "Invalid baseline date range: baseline_end must be on or after baseline_start",
                     common.json,
                 )
                 sys.exit(ExitCode.ERROR)
-
-        # Validate output format
-        valid_formats = ["markdown", "json", "csv"]
-        if format not in valid_formats:
-            logger.error("Invalid output format")
-            print_error(
-                f"Invalid format: {format}. Must be one of: {', '.join(valid_formats)}",
-                common.json,
-            )
-            sys.exit(ExitCode.ERROR)
 
         # Create configuration objects
         impact_config = ImpactScoringConfig(
@@ -262,8 +215,8 @@ def impact(
         logger.info(
             "Starting impact analysis",
             extra={
-                "start_date": start_date.isoformat(),
-                "end_date": end_date.isoformat(),
+                "start_date": start_date_obj.isoformat(),
+                "end_date": end_date_obj.isoformat(),
                 "baseline_mode": baseline_mode,
                 "mv_name_filter": mv_name,
                 "format": format,
@@ -273,11 +226,11 @@ def impact(
         # Run impact analysis asynchronously
         result = asyncio.run(
             _run_impact_analysis(
-                start_date=start_date,
-                end_date=end_date,
+                start_date=start_date_obj,
+                end_date=end_date_obj,
                 baseline_mode=baseline_mode,
-                baseline_start=baseline_start,
-                baseline_end=baseline_end,
+                baseline_start=baseline_start_obj,
+                baseline_end=baseline_end_obj,
                 mv_name_filter=mv_name,
                 common=common,
                 impact_config=impact_config,

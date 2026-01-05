@@ -3,11 +3,10 @@
 import json
 import sys
 from pathlib import Path
-from typing import Annotated
 
-from cyclopts import Parameter
+import click
 
-from bigquery_automv.cli.app import CommonConfig, app
+from bigquery_automv.cli.app import app
 from bigquery_automv.lib.logging import setup_logging
 from bigquery_automv.services.bq_client import BigQueryClient
 from bigquery_automv.services.smart_tuning import SmartTuningCheckResult, SmartTuningService
@@ -21,46 +20,28 @@ class ExitCode:
     NOT_ELIGIBLE = 2
 
 
-@app.command
+@app.command()
+@click.argument("query_hash", required=False)
+@click.option(
+    "--sql",
+    help="Direct SQL string to analyze",
+)
+@click.option(
+    "--from-file",
+    type=click.Path(path_type=Path),
+    help="Read SQL from file",
+)
+@click.option(
+    "--rulebook-version",
+    help="Rulebook version for eligibility checks (default: v1.0)",
+)
+@click.pass_context
 def smart_tuning_check(
-    query_hash: Annotated[
-        str | None,
-        Parameter(
-            name="query_hash",
-            help="Query hash to check (use --sql or --from-file instead)",
-            show_default=False,
-        ),
-    ] = None,
-    sql: Annotated[
-        str | None,
-        Parameter(
-            name="--sql",
-            help="Direct SQL string to analyze",
-        ),
-    ] = None,
-    from_file: Annotated[
-        Path | None,
-        Parameter(
-            name="--from-file",
-            help="Read SQL from file",
-            parse=lambda p: Path(p) if p else None,
-        ),
-    ] = None,
-    rulebook_version: Annotated[
-        str | None,
-        Parameter(
-            name="--rulebook-version",
-            help="Rulebook version for eligibility checks (default: v1.0)",
-        ),
-    ] = None,
-    *,
-    common: Annotated[
-        CommonConfig | None,
-        Parameter(
-            name="*",
-            help="Common configuration options",
-        ),
-    ] = None,
+    ctx: click.Context,
+    query_hash: str | None,
+    sql: str | None,
+    from_file: Path | None,
+    rulebook_version: str | None,
 ) -> None:
     """Check if queries are eligible for BigQuery Smart Tuning.
 
@@ -94,8 +75,7 @@ def smart_tuning_check(
       # JSON output
       bq-automv smart-tuning-check --sql "SELECT..." --json
     """
-    if common is None:
-        common = CommonConfig()
+    common = ctx.obj["common"]
 
     # Setup logging
     logger = setup_logging(common)

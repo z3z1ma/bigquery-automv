@@ -57,7 +57,7 @@ class TestRedundantMVs:
             referenced_tables=[TableReference("p", "d", "t", "US")],
             # Simulate predicate lifting that removed all filters
             locked_predicates=[],
-            lifted_columns=["col1"],
+            lifted_columns=[],
             smart_tuning_eligible=True,
         )
 

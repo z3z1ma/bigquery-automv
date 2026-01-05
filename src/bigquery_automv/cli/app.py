@@ -1,39 +1,97 @@
 """CLI application entry point for bq-automv."""
 
 import os
-from dataclasses import dataclass, field
-from typing import Annotated
+from dataclasses import dataclass
 
-from cyclopts import App, Parameter
+import click
 
 # Version metadata
 __version__ = "0.1.0"
 
 
-@Parameter(name="*")  # Flatten namespace so all commands inherit these parameters
-@dataclass(kw_only=True)
+@dataclass
 class CommonConfig:
     """Shared parameters for all commands."""
 
-    project: Annotated[str, Parameter(name="--project", env_var=["GOOGLE_CLOUD_PROJECT", "BQ_AUTOMV_PROJECT"])] = field(
-        default_factory=lambda: os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("BQ_AUTOMV_PROJECT") or ""
-    )
-    region: Annotated[str, Parameter(name="--region", env_var=["BQ_AUTOMV_REGION"])] = "US"
-    dataset: Annotated[str, Parameter(name="--dataset", env_var=["BQ_AUTOMV_DATASET"])] = field(
-        default_factory=lambda: os.getenv("BQ_AUTOMV_DATASET") or ""
-    )
-    dry_run: Annotated[bool, Parameter(name="--dry-run", negative="")] = False
-    verbose: Annotated[bool, Parameter(name=["--verbose", "-v"], negative="")] = False
-    json: Annotated[bool, Parameter(name="--json", negative="")] = False
-    enable_preview_eligibility: Annotated[bool, Parameter(name="--enable-preview-eligibility", negative="")] = False
-    include_user_email: Annotated[bool, Parameter(name="--include-user-email", negative="")] = False
+    project: str
+    region: str
+    dataset: str
+    dry_run: bool
+    verbose: bool
+    json: bool
+    enable_preview_eligibility: bool
+    include_user_email: bool
+    include_query_text: bool = False
 
 
-app = App(
-    name="bq-automv",
-    help="BigQuery materialized view automation tool",
-    version=f"bq-automv {__version__}",
+@click.group()
+@click.version_option(__version__)
+@click.option(
+    "--project",
+    envvar=["GOOGLE_CLOUD_PROJECT", "BQ_AUTOMV_PROJECT"],
+    help="GCP project ID",
 )
+@click.option(
+    "--region",
+    envvar="BQ_AUTOMV_REGION",
+    default="US",
+    help="BigQuery region",
+)
+@click.option(
+    "--dataset",
+    envvar="BQ_AUTOMV_DATASET",
+    help="BigQuery dataset",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Dry run mode",
+)
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    help="Verbose logging",
+)
+@click.option(
+    "--json",
+    is_flag=True,
+    help="JSON output",
+)
+@click.option(
+    "--enable-preview-eligibility",
+    is_flag=True,
+    help="Enable preview features",
+)
+@click.option(
+    "--include-user-email",
+    is_flag=True,
+    help="Include user email in output",
+)
+@click.pass_context
+def app(
+    ctx: click.Context,
+    project: str | None,
+    region: str,
+    dataset: str | None,
+    dry_run: bool,
+    verbose: bool,
+    json: bool,
+    enable_preview_eligibility: bool,
+    include_user_email: bool,
+) -> None:
+    """BigQuery materialized view automation tool"""
+    ctx.ensure_object(dict)
+    ctx.obj["common"] = CommonConfig(
+        project=project or os.getenv("GOOGLE_CLOUD_PROJECT") or "",
+        region=region,
+        dataset=dataset or "",
+        dry_run=dry_run,
+        verbose=verbose,
+        json=json,
+        enable_preview_eligibility=enable_preview_eligibility,
+        include_user_email=include_user_email,
+    )
 
 
 def main() -> None:

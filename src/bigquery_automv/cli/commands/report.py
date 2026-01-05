@@ -1,27 +1,13 @@
-"""Report command for cost optimization reporting.
-
-This module implements the report CLI command for generating cost optimization
-reports for query candidates.
-
-Tasks implemented:
-- T061: Report command with QUERY_HASH positional and --from-file support
-- T062: Output formatters (markdown, json, csv)
-- T063: Custom pricing support via --price-per-tib
-- T064: Integration with AnalyzerService
-- T066: Query hash file reading
-- T067: Summary section
-- T068: Graceful handling of missing query hashes
-"""
+"""Report command for cost optimization reporting."""
 
 import asyncio
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Annotated
 
-from cyclopts import Parameter
+import click
 
-from bigquery_automv.cli.app import CommonConfig, app
+from bigquery_automv.cli.app import app
 from bigquery_automv.lib.logging import get_logger, setup_logging
 from bigquery_automv.models.cost_analysis import CostAnalysisResult
 from bigquery_automv.services.analyzer import AnalyzerService
@@ -44,84 +30,95 @@ class ExitCode:
     PARTIAL_SUCCESS = 2
 
 
-@app.command
-def report(
+async def _run_analysis(
     query_hashes: list[str],
-    format: Annotated[
-        str,
-        Parameter(
-            name="--format",
-            help='Output format: "markdown", "json", "csv"',
-        ),
-    ] = "markdown",
-    price_per_tib: Annotated[
-        float,
-        Parameter(
-            name="--price-per-tib",
-            help="BigQuery on-demand pricing per TiB (default: $6.25)",
-        ),
-    ] = 6.25,
-    from_file: Annotated[
-        Path | None,
-        Parameter(
-            name="--from-file",
-            help="Read query hashes from file (one per line)",
-            parse=lambda p: Path(p) if p else None,
-        ),
-    ] = None,
-    days: Annotated[
-        int,
-        Parameter(
-            name="--days",
-            help="Number of days to look back for analysis (default: 30)",
-        ),
-    ] = 30,
-    start_date: Annotated[
-        str | None,
-        Parameter(
-            name="--start-date",
-            help="Start date for analysis (YYYY-MM-DD format). Overrides --days.",
-        ),
-    ] = None,
-    end_date: Annotated[
-        str | None,
-        Parameter(
-            name="--end-date",
-            help="End date for analysis (YYYY-MM-DD format, default: today)",
-        ),
-    ] = None,
-    output: Annotated[
-        Path | None,
-        Parameter(
-            name="--output",
-            help="Write report to file instead of stdout",
-            parse=lambda p: Path(p) if p else None,
-        ),
-    ] = None,
+    start_date: datetime,
+    end_date: datetime,
     *,
-    common: Annotated[
-        CommonConfig | None,
-        Parameter(
-            name="*",
-            help="Common configuration options",
-        ),
-    ] = None,
+    common: object,
+    price_per_tib: float,
+) -> tuple[list[CostAnalysisResult], object]:
+    """Run cost analysis for query hashes."""
+    logger.info(f"Analyzing {len(query_hashes)} query hash(es)...")
+    logger.info(f"Analysis period: {start_date.date()} to {end_date.date()}")
+    logger.info(f"Project: {common.project}")
+
+    # Initialize services
+    async with BigQueryClient(
+        project_id=common.project if common.project else None,
+        region=common.region,
+    ) as client:
+        analyzer = AnalyzerService(client)
+        reporter = ReporterService(analyzer)
+
+        results = await reporter.analyze_multiple_queries(
+            query_hashes,
+            start_date,
+            end_date,
+            project_id=common.project,
+            price_per_tib=price_per_tib,
+        )
+
+        logger.info(f"Successfully analyzed {len(results)} query hash(es)")
+
+        # Generate summary
+        summary = reporter.generate_summary(results)
+
+        return results, summary
+
+
+@app.command()
+@click.argument("query_hashes", nargs=-1)
+@click.option(
+    "--format",
+    type=click.Choice(["markdown", "json", "csv"]),
+    default="markdown",
+    help="Output format",
+)
+@click.option(
+    "--price-per-tib",
+    default=6.25,
+    help="BigQuery on-demand pricing per TiB (default: $6.25)",
+)
+@click.option(
+    "--from-file",
+    type=click.Path(path_type=Path),
+    help="Read query hashes from file (one per line)",
+)
+@click.option(
+    "--days",
+    default=30,
+    help="Number of days to look back for analysis (default: 30)",
+)
+@click.option(
+    "--start-date",
+    help="Start date for analysis (YYYY-MM-DD format). Overrides --days.",
+)
+@click.option(
+    "--end-date",
+    help="End date for analysis (YYYY-MM-DD format, default: today)",
+)
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path),
+    help="Write report to file instead of stdout",
+)
+@click.pass_context
+def report(
+    ctx: click.Context,
+    query_hashes: tuple[str, ...],
+    format: str,
+    price_per_tib: float,
+    from_file: Path | None,
+    days: int,
+    start_date: str | None,
+    end_date: str | None,
+    output: Path | None,
 ) -> None:
     """Generate cost optimization report for specific query candidates.
 
     Provides detailed cost analysis and projected savings for materialized view
     candidates. Supports markdown, JSON, and CSV output formats.
-
-    Args:
-        query_hashes: One or more query hashes to analyze
-        format: Output format (markdown, json, csv)
-        price_per_tib: Custom price per TiB in USD
-        from_file: Path to file containing query hashes (one per line)
-        days: Number of days to look back for analysis
-        start_date: Start date in YYYY-MM-DD format
-        end_date: End date in YYYY-MM-DD format
-        output: Optional output file path
-        common: Common configuration options
 
     Examples:
         # Report on specific query hashes
@@ -136,28 +133,20 @@ def report(
         # Specify date range
         bq-automv report abc123 --start-date 2024-01-01 --end-date 2024-01-31
     """
-    if common is None:
-        common = CommonConfig()
+    common = ctx.obj["common"]
 
     # Set up logging
     logger = setup_logging(common)
     exit_code = ExitCode.SUCCESS
 
     try:
-        # Validate format
-        valid_formats = {"markdown", "json", "csv"}
-        if format not in valid_formats:
-            logger.error(f"Invalid format '{format}'. Must be one of: {', '.join(valid_formats)}")
-            _print_error(f"Invalid format '{format}'. Must be one of: {', '.join(valid_formats)}", common.json)
-            sys.exit(ExitCode.ERROR)
-
         # Read query hashes from file if specified (T066)
         if from_file:
             file_hashes = _read_query_hashes_from_file(from_file, common.json)
             # Combine positional and file hashes
-            all_hashes = list(set(query_hashes + file_hashes))
+            all_hashes = list(set(list(query_hashes) + file_hashes))
         else:
-            all_hashes = query_hashes
+            all_hashes = list(query_hashes)
 
         if not all_hashes:
             logger.error("No query hashes provided. Use QUERY_HASH... or --from-file.")
@@ -231,18 +220,7 @@ def report(
 
 
 def _read_query_hashes_from_file(file_path: Path, as_json: bool) -> list[str]:
-    """Read query hashes from file (T066).
-
-    Args:
-        file_path: Path to file containing query hashes (one per line)
-        as_json: Whether to format errors as JSON
-
-    Returns:
-        List of query hashes
-
-    Raises:
-        SystemExit: If file cannot be read
-    """
+    """Read query hashes from file (T066)."""
     try:
         content = file_path.read_text()
         # Split by lines and filter empty/comments
@@ -269,20 +247,7 @@ def _calculate_date_range(
     end_date: str | None,
     as_json: bool,
 ) -> tuple[datetime, datetime]:
-    """Calculate analysis date range.
-
-    Args:
-        days: Number of days to look back
-        start_date: Start date in YYYY-MM-DD format (overrides days)
-        end_date: End date in YYYY-MM-DD format
-        as_json: Whether to format errors as JSON
-
-    Returns:
-        Tuple of (start_datetime, end_datetime)
-
-    Raises:
-        SystemExit: If date format is invalid
-    """
+    """Calculate analysis date range."""
     try:
         if end_date:
             end = datetime.strptime(end_date, "%Y-%m-%d")
@@ -307,72 +272,12 @@ def _calculate_date_range(
         raise SystemExit(ExitCode.ERROR) from None
 
 
-async def _run_analysis(
-    query_hashes: list[str],
-    start_date: datetime,
-    end_date: datetime,
-    *,
-    common: CommonConfig,
-    price_per_tib: float,
-) -> tuple[list[CostAnalysisResult], object]:
-    """Run cost analysis for query hashes.
-
-    Args:
-        query_hashes: List of query hashes to analyze
-        start_date: Start of analysis period
-        end_date: End of analysis period
-        common: Common configuration
-        price_per_tib: Price per TiB in USD
-
-    Returns:
-        Tuple of (results list, summary object)
-    """
-    logger.info(f"Analyzing {len(query_hashes)} query hash(es)...")
-    logger.info(f"Analysis period: {start_date.date()} to {end_date.date()}")
-    logger.info(f"Project: {common.project}")
-
-    # Initialize services
-    async with BigQueryClient(
-        project_id=common.project if common.project else None,
-        region=common.region,
-    ) as client:
-        analyzer = AnalyzerService(client)
-        reporter = ReporterService(analyzer)
-
-        results = await reporter.analyze_multiple_queries(
-            query_hashes,
-            start_date,
-            end_date,
-            project_id=common.project,
-            price_per_tib=price_per_tib,
-        )
-
-        logger.info(f"Successfully analyzed {len(results)} query hash(es)")
-
-        # Generate summary
-        summary = reporter.generate_summary(results)
-
-        return results, summary
-
-
 def _format_output(
     format: str,
     results: list[CostAnalysisResult],
     summary,
 ) -> str:
-    """Format analysis results (T062).
-
-    Args:
-        format: Output format (markdown, json, csv)
-        results: List of CostAnalysisResult objects
-        summary: ReportSummary object
-
-    Returns:
-        Formatted output string
-
-    Raises:
-        ValueError: If format is invalid
-    """
+    """Format analysis results (T062)."""
     from bigquery_automv.services.reporter import ReporterService
 
     # Create a dummy reporter for formatting (stateless)
@@ -390,16 +295,7 @@ def _format_output(
 
 
 def _write_output(output_text: str, output_path: Path | None, as_json: bool) -> None:
-    """Write output to file or stdout.
-
-    Args:
-        output_text: Formatted output text
-        output_path: Optional output file path
-        as_json: Whether to format errors as JSON
-
-    Raises:
-        SystemExit: If file write fails
-    """
+    """Write output to file or stdout."""
     if output_path:
         try:
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -414,13 +310,7 @@ def _write_output(output_text: str, output_path: Path | None, as_json: bool) -> 
 
 
 def _print_error(message: str, as_json: bool, suggestion: str | None = None) -> None:
-    """Print error message to stderr.
-
-    Args:
-        message: Error message
-        as_json: Whether to format as JSON
-        suggestion: Optional suggestion for fixing the error
-    """
+    """Print error message to stderr."""
     import json
 
     if as_json:

@@ -1,4 +1,4 @@
-"""Analyze command for BigQuery query pattern analysis."""
+"Analyze command for BigQuery query pattern analysis."
 
 import asyncio
 import csv
@@ -6,11 +6,10 @@ import json
 import sys
 from datetime import date, datetime
 from pathlib import Path
-from typing import Annotated
 
-from cyclopts import Parameter
+import click
 
-from bigquery_automv.cli.app import CommonConfig, app
+from bigquery_automv.cli.app import app
 from bigquery_automv.lib.config import AnalysisConfig, ImpactScoringConfig
 from bigquery_automv.lib.logging import setup_logging
 from bigquery_automv.services.analyzer import AnalysisResult, AnalyzerService
@@ -34,32 +33,14 @@ class ExitCode:
 async def _run_analysis(
     start_date: date,
     end_date: date,
-    common: CommonConfig,
+    common: object,
     analysis_config: AnalysisConfig,
     impact_config: ImpactScoringConfig,
     include_ineligible: bool = False,
     persist: bool = False,
     persist_dataset: str | None = None,
 ) -> AnalysisResult:
-    """Run the analysis asynchronously.
-
-    Args:
-        start_date: Start of analysis window
-        end_date: End of analysis window
-        common: Common configuration
-        analysis_config: Analysis configuration
-        impact_config: Impact scoring configuration
-        include_ineligible: Include candidates that are not eligible for Smart Tuning
-        persist: Persist candidates to BigQuery table
-        persist_dataset: Dataset for persisting candidates (defaults to common.dataset)
-
-    Returns:
-        AnalysisResult
-
-    Raises:
-        ValueError: If configuration is invalid
-        BigQueryError: If query fails
-    """
+    """Run the analysis asynchronously."""
     # Setup logging (T035)
     logger = setup_logging(common)
 
@@ -147,16 +128,7 @@ async def _persist_candidates(
     start_date: date,
     end_date: date,
 ) -> None:
-    """Persist analysis candidates to BigQuery table.
-
-    Args:
-        client: BigQuery client
-        result: Analysis result with candidates
-        dataset_id: Target dataset ID
-        start_date: Analysis start date
-        end_date: Analysis end date
-    """
-
+    """Persist analysis candidates to BigQuery table."""
     logger = setup_logging()
 
     # Initialize candidates table if needed
@@ -220,157 +192,116 @@ async def _persist_candidates(
     )
 
 
-@app.command
+@app.command()
+@click.option(
+    "--start-date",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    required=True,
+    help="Start of analysis window (inclusive, YYYY-MM-DD format)",
+)
+@click.option(
+    "--end-date",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    default=str(date.today()),
+    help="End of analysis window (inclusive, YYYY-MM-DD format)",
+)
+@click.option(
+    "--min-executions",
+    default=10,
+    help="Minimum execution count per query family",
+)
+@click.option(
+    "--min-bytes",
+    default=1073741824,  # 1GB
+    help="Minimum bytes processed threshold",
+)
+@click.option(
+    "--min-slot-ms",
+    default=0,
+    help="Minimum slot milliseconds threshold",
+)
+@click.option(
+    "--max-families",
+    default=100,
+    help="Maximum number of query families to return",
+)
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path),
+    help="Write results to file (JSON/CSV)",
+)
+@click.option(
+    "--price-per-tib",
+    default=6.25,
+    help="BigQuery on-demand price per TiB for impact scoring",
+)
+@click.option(
+    "--slot-weight",
+    default=0.25,
+    help="Weight for slot component in impact score",
+)
+@click.option(
+    "--slot-ms-per-tib-equivalent",
+    default=3.6e9,
+    help="Slot-ms to TiB equivalent conversion factor",
+)
+@click.option(
+    "--sample-size-k",
+    default=20,
+    help="Number of sample queries for MV synthesis",
+)
+@click.option(
+    "--rulebook-version",
+    default="latest",
+    help="Smart Tuning rulebook version for eligibility checks",
+)
+@click.option(
+    "--include-ineligible",
+    is_flag=True,
+    help="Include candidates that are not eligible for Smart Tuning",
+)
+@click.option(
+    "--persist",
+    is_flag=True,
+    help="Persist candidates to BigQuery table for later use with generate-mv",
+)
+@click.option(
+    "--persist-dataset",
+    help="Dataset for persisting candidates (defaults to --dataset if not set)",
+)
+@click.pass_context
 def analyze(
-    start_date: Annotated[
-        date,
-        Parameter(
-            name="--start-date",
-            help="Start of analysis window (inclusive, YYYY-MM-DD format)",
-        ),
-    ],
-    end_date: Annotated[
-        date,
-        Parameter(
-            name="--end-date",
-            help="End of analysis window (inclusive, YYYY-MM-DD format)",
-        ),
-    ] = date.today(),  # noqa: B008
-    min_executions: Annotated[
-        int,
-        Parameter(
-            name="--min-executions",
-            help="Minimum execution count per query family",
-        ),
-    ] = 10,
-    min_bytes: Annotated[
-        int,
-        Parameter(
-            name="--min-bytes",
-            help="Minimum bytes processed threshold",
-        ),
-    ] = 1073741824,  # 1GB
-    min_slot_ms: Annotated[
-        int,
-        Parameter(
-            name="--min-slot-ms",
-            help="Minimum slot milliseconds threshold",
-        ),
-    ] = 0,
-    max_families: Annotated[
-        int,
-        Parameter(
-            name="--max-families",
-            help="Maximum number of query families to return",
-        ),
-    ] = 100,
-    output: Annotated[
-        Path | None,
-        Parameter(
-            name="--output",
-            help="Write results to file (JSON/CSV)",
-            parse=lambda p: Path(p) if p else None,
-        ),
-    ] = None,
-    price_per_tib: Annotated[
-        float,
-        Parameter(
-            name="--price-per-tib",
-            help="BigQuery on-demand price per TiB for impact scoring",
-        ),
-    ] = 6.25,
-    slot_weight: Annotated[
-        float,
-        Parameter(
-            name="--slot-weight",
-            help="Weight for slot component in impact score",
-        ),
-    ] = 0.25,
-    slot_ms_per_tib_equivalent: Annotated[
-        float,
-        Parameter(
-            name="--slot-ms-per-tib-equivalent",
-            help="Slot-ms to TiB equivalent conversion factor",
-        ),
-    ] = 3.6e9,
-    sample_size_k: Annotated[
-        int,
-        Parameter(
-            name="--sample-size-k",
-            help="Number of sample queries for MV synthesis",
-        ),
-    ] = 20,
-    rulebook_version: Annotated[
-        str,
-        Parameter(
-            name="--rulebook-version",
-            help="Smart Tuning rulebook version for eligibility checks",
-        ),
-    ] = "latest",
-    include_ineligible: Annotated[
-        bool,
-        Parameter(
-            name="--include-ineligible",
-            help="Include candidates that are not eligible for Smart Tuning",
-            negative=False,
-        ),
-    ] = False,
-    persist: Annotated[
-        bool,
-        Parameter(
-            name="--persist",
-            help="Persist candidates to BigQuery table for later use with generate-mv",
-            negative=False,
-        ),
-    ] = False,
-    persist_dataset: Annotated[
-        str | None,
-        Parameter(
-            name="--persist-dataset",
-            help="Dataset for persisting candidates (defaults to --dataset if not set)",
-        ),
-    ] = None,
-    *,
-    common: Annotated[
-        CommonConfig | None,
-        Parameter(
-            name="*",
-            help="Common configuration options",
-        ),
-    ] = None,
+    ctx: click.Context,
+    start_date: datetime,
+    end_date: datetime,
+    min_executions: int,
+    min_bytes: int,
+    min_slot_ms: int,
+    max_families: int,
+    output: Path | None,
+    price_per_tib: float,
+    slot_weight: float,
+    slot_ms_per_tib_equivalent: float,
+    sample_size_k: int,
+    rulebook_version: str,
+    include_ineligible: bool,
+    persist: bool,
+    persist_dataset: str | None,
 ) -> None:
-    """Analyze BigQuery INFORMATION_SCHEMA.JOBS to identify expensive query patterns.
-
-    This command analyzes historical query patterns to find candidates for
-    materialized views that can leverage BigQuery Smart Tuning for automatic
-    query rerouting.
-
-    Features:
-        - Pagination support for >1M jobs (T031)
-        - Exclusion filters (SCRIPT, cache hits, NULL bytes_billed with warnings) (T032, T036)
-        - Region validation (T033)
-        - CommonConfig integration (T034)
-        - Structured logging with runtime metrics (T035)
-
-    Example:
-        ```bash
-        bq-automv analyze \\
-          --start-date 2024-01-01 \\
-          --end-date 2024-01-31 \\
-          --min-executions 50 \\
-          --output results.json
-        ```
-    """
-    if common is None:
-        common = CommonConfig()
+    """Analyze BigQuery INFORMATION_SCHEMA.JOBS to identify expensive query patterns."""
+    common = ctx.obj["common"]
 
     # Set up logging
     logger = setup_logging(common)
     exit_code = ExitCode.SUCCESS
 
     try:
+        # Convert click.DateTime to date
+        start_date_obj = start_date.date()
+        end_date_obj = end_date.date()
+
         # Validate date range
-        if end_date < start_date:
+        if end_date_obj < start_date_obj:
             logger.error("End date must be on or after start date")
             print_error("Invalid date range: end_date must be on or after start_date", common.json)
             sys.exit(ExitCode.ERROR)
@@ -393,8 +324,8 @@ def analyze(
         logger.info(
             "Starting analysis",
             extra={
-                "start_date": start_date.isoformat(),
-                "end_date": end_date.isoformat(),
+                "start_date": start_date_obj.isoformat(),
+                "end_date": end_date_obj.isoformat(),
                 "min_executions": min_executions,
                 "min_bytes": min_bytes,
                 "min_slot_ms": min_slot_ms,
@@ -405,8 +336,8 @@ def analyze(
         # Run analysis asynchronously
         result = asyncio.run(
             _run_analysis(
-                start_date=start_date,
-                end_date=end_date,
+                start_date=start_date_obj,
+                end_date=end_date_obj,
                 common=common,
                 analysis_config=analysis_config,
                 impact_config=impact_config,

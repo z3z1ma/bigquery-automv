@@ -3,9 +3,8 @@
 import asyncio
 import sys
 from datetime import date, datetime
-from typing import Annotated
 
-from cyclopts import Parameter
+import click
 
 from bigquery_automv.cli.app import CommonConfig, app
 
@@ -20,81 +19,67 @@ from bigquery_automv.services.mv_generator import MVGeneratorService
 from bigquery_automv.services.smart_tuning import SmartTuningService
 
 
-@app.command
+@app.command(name="run")
+@click.option(
+    "--start-date",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    required=True,
+    help="Start of analysis window (inclusive, YYYY-MM-DD format)",
+)
+@click.option(
+    "--end-date",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    default=str(date.today()),
+    help="End of analysis window (inclusive, YYYY-MM-DD format)",
+)
+@click.option(
+    "--min-executions",
+    default=10,
+    help="Minimum execution count per query family",
+)
+@click.option(
+    "--min-bytes",
+    default=1073741824,
+    help="Minimum bytes processed threshold",
+)
+@click.option(
+    "--max-families",
+    default=20,
+    help="Maximum number of query families to return",
+)
+@click.option(
+    "--mv-prefix",
+    default="automv_",
+    help="Prefix for generated MV names",
+)
+@click.option(
+    "--refresh-interval-minutes",
+    default=60,
+    help="MV refresh interval in minutes",
+)
+@click.option(
+    "--enable-refresh/--no-refresh",
+    default=True,
+    help="Enable automatic refresh for MVs",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    help="Skip confirmation prompt",
+)
+@click.pass_context
 def run(
-    start_date: Annotated[
-        date,
-        Parameter(
-            name="--start-date",
-            help="Start of analysis window (inclusive, YYYY-MM-DD format)",
-        ),
-    ],
-    end_date: Annotated[
-        date,
-        Parameter(
-            name="--end-date",
-            help="End of analysis window (inclusive, YYYY-MM-DD format)",
-        ),
-    ] = date.today(),  # noqa: B008
-    min_executions: Annotated[
-        int,
-        Parameter(
-            name="--min-executions",
-            help="Minimum execution count per query family",
-        ),
-    ] = 10,
-    min_bytes: Annotated[
-        int,
-        Parameter(
-            name="--min-bytes",
-            help="Minimum bytes processed threshold",
-        ),
-    ] = 1073741824,  # 1GB
-    max_families: Annotated[
-        int,
-        Parameter(
-            name="--max-families",
-            help="Maximum number of query families to return",
-        ),
-    ] = 20,
-    mv_prefix: Annotated[
-        str,
-        Parameter(
-            name="--mv-prefix",
-            help="Prefix for generated MV names",
-        ),
-    ] = "automv_",
-    refresh_interval_minutes: Annotated[
-        int,
-        Parameter(
-            name="--refresh-interval-minutes",
-            help="MV refresh interval in minutes",
-        ),
-    ] = 60,
-    enable_refresh: Annotated[
-        bool,
-        Parameter(
-            name="--enable-refresh",
-            help="Enable automatic refresh for MVs",
-            negative="--no-refresh",
-        ),
-    ] = True,
-    yes: Annotated[
-        bool,
-        Parameter(
-            name=["--yes", "-y"],
-            help="Skip confirmation prompt",
-            negative="",
-        ),
-    ] = False,
-    *,
-    common: Annotated[
-        CommonConfig | None,
-        Parameter(
-            name="*",
-            help="Common configuration options",
-        ),
-    ] = None,
+    ctx: click.Context,
+    start_date: datetime,
+    end_date: datetime,
+    min_executions: int,
+    min_bytes: int,
+    max_families: int,
+    mv_prefix: str,
+    refresh_interval_minutes: int,
+    enable_refresh: bool,
+    yes: bool,
 ) -> None:
     """Interactive workflow: Analyze queries and generate MVs.
 
@@ -109,16 +94,15 @@ def run(
         bq-automv run --start-date 2024-01-01 --min-executions 50
         ```
     """
-    if common is None:
-        common = CommonConfig()
+    common = ctx.obj["common"]
 
     logger = setup_logging(common)
 
     try:
         asyncio.run(
             _run_interactive(
-                start_date=start_date,
-                end_date=end_date,
+                start_date=start_date.date(),
+                end_date=end_date.date(),
                 common=common,
                 min_executions=min_executions,
                 min_bytes=min_bytes,

@@ -1,18 +1,16 @@
 """Generate MV command for materialized view creation."""
 
 import asyncio
-import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated
 
-from cyclopts import Parameter
+import click
 from google.api_core.exceptions import AlreadyExists
 from tqdm import tqdm
 
-from bigquery_automv.cli.app import CommonConfig, app
+from bigquery_automv.cli.app import app
 from bigquery_automv.lib.logging import get_logger
 from bigquery_automv.models.query_candidate import QueryCandidate
 from bigquery_automv.services.bq_client import BigQueryClient
@@ -32,16 +30,7 @@ class ExitCode:
 
 @dataclass
 class GenerationResult:
-    """Result of MV generation for a single query hash.
-
-    Attributes:
-        query_hash: Query family hash
-        status: Generation status (success, failed, skipped, exists)
-        mv_name: Generated MV name (if applicable)
-        message: Status message
-        error: Error message (if failed)
-        ddl: DDL statement (if dry_run)
-    """
+    """Result of MV generation for a single query hash."""
 
     query_hash: str
     status: str
@@ -53,16 +42,7 @@ class GenerationResult:
 
 @dataclass
 class BatchResult:
-    """Result of batch MV generation.
-
-    Attributes:
-        total: Total number of query hashes processed
-        successful: Number of successful generations
-        failed: Number of failed generations
-        skipped: Number of skipped generations
-        existing: Number of already-existing MVs (no-op)
-        results: Individual results per query hash
-    """
+    """Result of batch MV generation."""
 
     total: int
     successful: int
@@ -76,158 +56,6 @@ class GenerateMVPromptError(Exception):
     """Raised when user declines confirmation prompt."""
 
     pass
-
-
-@app.command
-def generate_mv(
-    query_hashes: Annotated[
-        list[str],
-        Parameter(
-            name="QUERY_HASH",
-            help="Query family hashes to generate MVs for",
-        ),
-    ],
-    mv_prefix: Annotated[
-        str,
-        Parameter(
-            name="--mv-prefix",
-            help="Prefix for generated MV names",
-        ),
-    ] = "automv_",
-    name_scheme_version: Annotated[
-        str,
-        Parameter(
-            name="--name-scheme-version",
-            help="Naming scheme version (for future changes)",
-        ),
-    ] = "v1",
-    refresh_interval_minutes: Annotated[
-        int,
-        Parameter(
-            name="--refresh-interval-minutes",
-            help="MV refresh interval in minutes",
-        ),
-    ] = 60,
-    no_refresh: Annotated[
-        bool,
-        Parameter(
-            name="--no-refresh",
-            help="Disable automatic refresh",
-            negative="",
-        ),
-    ] = False,
-    replace: Annotated[
-        bool,
-        Parameter(
-            name="--replace",
-            help="Drop and recreate existing MVs",
-            negative="",
-        ),
-    ] = False,
-    enable_auto_cleanup: Annotated[
-        bool,
-        Parameter(
-            name="--enable-auto-cleanup",
-            help="Enable automatic cleanup of stale MVs",
-            negative="",
-        ),
-    ] = False,
-    from_file: Annotated[
-        Path | None,
-        Parameter(
-            name="--from-file",
-            help="Read query hashes from file (one per line)",
-            parse=lambda p: Path(p) if p else None,
-        ),
-    ] = None,
-    from_analyze: Annotated[
-        Path | None,
-        Parameter(
-            name="--from-analyze",
-            help="Read candidates from analyze output JSON file",
-            parse=lambda p: Path(p) if p else None,
-        ),
-    ] = None,
-    from_candidates_table: Annotated[
-        bool,
-        Parameter(
-            name="--from-candidates-table",
-            help="Read candidates from BigQuery query_candidates table in target dataset",
-            negative=False,
-        ),
-    ] = False,
-    candidates_table: Annotated[
-        str,
-        Parameter(
-            name="--candidates-table",
-            help="Custom candidates table name (default: query_candidates)",
-        ),
-    ] = "query_candidates",
-    dry_run: Annotated[
-        bool,
-        Parameter(
-            name="--dry-run",
-            help="Output DDL without executing",
-            negative="",
-        ),
-    ] = False,
-    yes: Annotated[
-        bool,
-        Parameter(
-            name=["--yes", "-y"],
-            help="Skip confirmation prompt",
-            negative="",
-        ),
-    ] = False,
-    *,
-    common: Annotated[
-        CommonConfig | None,
-        Parameter(
-            name="*",
-            help="Common configuration options",
-        ),
-    ] = None,
-) -> None:
-    """Generate and deploy materialized views for eligible queries.
-
-    Creates optimized materialized views based on query analysis. Supports
-    dry-run mode for previewing DDL without execution.
-
-    Examples:
-        # Generate MV for a single query hash (dry run)
-        bq-automv generate-mv abc123 --dry-run
-
-        # Generate and deploy MV for multiple hashes
-        bq-automv generate-mv abc123 def456 --yes
-
-        # Read hashes from file
-        bq-automv generate-mv --from-file hashes.txt --yes
-
-        # Replace existing MV with new definition
-        bq-automv generate-mv abc123 --replace --yes
-    """
-    if common is None:
-        common = CommonConfig()
-
-    # Run async command
-    return asyncio.run(
-        _generate_mv_async(
-            query_hashes=query_hashes,
-            mv_prefix=mv_prefix,
-            name_scheme_version=name_scheme_version,
-            refresh_interval_minutes=refresh_interval_minutes,
-            no_refresh=no_refresh,
-            replace=replace,
-            enable_auto_cleanup=enable_auto_cleanup,
-            from_file=from_file,
-            from_analyze=from_analyze,
-            from_candidates_table=from_candidates_table,
-            candidates_table=candidates_table,
-            dry_run=dry_run,
-            yes=yes,
-            common=common,
-        )
-    )
 
 
 async def _generate_mv_async(
@@ -244,7 +72,7 @@ async def _generate_mv_async(
     candidates_table: str,
     dry_run: bool,
     yes: bool,
-    common: CommonConfig,
+    common: object,
 ) -> str:
     """Async implementation of generate-mv command."""
     # Build candidates lookup from various sources
@@ -328,14 +156,7 @@ async def _generate_mv_async(
 
 
 async def _read_hashes_from_file(file_path: Path) -> list[str]:
-    """Read query hashes from file, one per line.
-
-    Args:
-        file_path: Path to file containing hashes
-
-    Returns:
-        List of query hashes (non-empty lines, stripped)
-    """
+    """Read query hashes from file, one per line."""
     if not file_path.exists():
         logger.error(f"Hash file not found: {file_path}")
         return []
@@ -356,14 +177,7 @@ async def _read_hashes_from_file(file_path: Path) -> list[str]:
 
 
 async def _load_candidates_from_analyze(file_path: Path) -> dict[str, QueryCandidate]:
-    """Load query candidates from analyze output JSON file.
-
-    Args:
-        file_path: Path to analyze output JSON file
-
-    Returns:
-        Dict mapping query_hash to QueryCandidate
-    """
+    """Load query candidates from analyze output JSON file."""
     import json
 
     candidates: dict[str, QueryCandidate] = {}
@@ -399,17 +213,7 @@ async def _load_candidates_from_table(
     project_id: str,
     query_hashes: list[str] | None = None,
 ) -> dict[str, QueryCandidate]:
-    """Load query candidates from BigQuery candidates table.
-
-    Args:
-        dataset_id: Dataset ID for candidates table
-        table_name: Table name (default: query_candidates)
-        project_id: Project ID
-        query_hashes: Optional list of hashes to filter by (None = load all)
-
-    Returns:
-        Dict mapping query_hash to QueryCandidate
-    """
+    """Load query candidates from BigQuery candidates table."""
     candidates: dict[str, QueryCandidate] = {}
 
     try:
@@ -454,7 +258,7 @@ ORDER BY impact_score DESC"""
 async def _process_batch(
     hashes: list[str],
     candidates_by_hash: dict[str, QueryCandidate],
-    common: CommonConfig,
+    common: object,
     mv_prefix: str,
     refresh_interval_minutes: int,
     enable_refresh: bool,
@@ -463,23 +267,7 @@ async def _process_batch(
     replace: bool,
     yes: bool,
 ) -> BatchResult:
-    """Process a batch of query hashes with progress reporting.
-
-    Args:
-        hashes: List of query hashes to process
-        candidates_by_hash: Dict mapping query hashes to QueryCandidate objects
-        common: Common configuration
-        mv_prefix: MV name prefix
-        refresh_interval_minutes: MV refresh interval
-        enable_refresh: Enable automatic refresh
-        enable_auto_cleanup: Enable automatic cleanup
-        dry_run: Dry run mode
-        replace: Replace existing MVs
-        yes: Skip confirmation
-
-    Returns:
-        BatchResult with summary and individual results
-    """
+    """Process a batch of query hashes with progress reporting."""
     results: list[GenerationResult] = []
 
     # T091: Confirmation prompt (unless --yes)
@@ -529,16 +317,7 @@ async def _process_batch(
 
 
 async def _confirm_deployment(hashes: list[str], replace: bool, dataset: str) -> bool:
-    """Prompt user for confirmation before deployment.
-
-    Args:
-        hashes: List of query hashes to process
-        replace: Whether replacing existing MVs
-        dataset: Target dataset
-
-    Returns:
-        True if user confirms, False otherwise
-    """
+    """Prompt user for confirmation before deployment."""
     print(f"\nAbout to generate {len(hashes)} materialized view(s) in dataset '{dataset}'")
 
     if replace:
@@ -557,7 +336,7 @@ async def _confirm_deployment(hashes: list[str], replace: bool, dataset: str) ->
 async def _process_single_hash(
     query_hash: str,
     candidate: QueryCandidate | None,
-    common: CommonConfig,
+    common: object,
     mv_prefix: str,
     refresh_interval_minutes: int,
     enable_refresh: bool,
@@ -565,22 +344,7 @@ async def _process_single_hash(
     dry_run: bool,
     replace: bool,
 ) -> GenerationResult:
-    """Process a single query hash.
-
-    Args:
-        query_hash: Query family hash
-        candidate: QueryCandidate object (if available from lookup)
-        common: Common configuration
-        mv_prefix: MV name prefix
-        refresh_interval_minutes: MV refresh interval
-        enable_refresh: Enable automatic refresh
-        enable_auto_cleanup: Enable automatic cleanup
-        dry_run: Dry run mode
-        replace: Replace existing MVs
-
-    Returns:
-        GenerationResult for this hash
-    """
+    """Process a single query hash."""
     # If no candidate found, skip
     if candidate is None:
         return GenerationResult(
@@ -634,7 +398,7 @@ async def _process_single_hash(
 
 async def _generate_mv_from_candidate(
     candidate: QueryCandidate,
-    common: CommonConfig,
+    common: object,
     mv_generator: MVGeneratorService,
     mv_prefix: str,
     refresh_interval_minutes: int,
@@ -643,22 +407,7 @@ async def _generate_mv_from_candidate(
     dry_run: bool,
     replace: bool,
 ) -> GenerationResult:
-    """Generate and deploy MV from a QueryCandidate.
-
-    Args:
-        candidate: Query candidate with representative SQL
-        common: Common configuration
-        mv_generator: MV generator service
-        mv_prefix: MV name prefix
-        refresh_interval_minutes: MV refresh interval
-        enable_refresh: Enable automatic refresh
-        enable_auto_cleanup: Enable automatic cleanup
-        dry_run: Dry run mode
-        replace: Replace existing MVs
-
-    Returns:
-        GenerationResult
-    """
+    """Generate and deploy MV from a QueryCandidate."""
     query_hash = candidate.query_hash
 
     try:
@@ -731,15 +480,7 @@ async def _create_progress_bar(
     hashes: list[str],
     dry_run: bool,
 ) -> AsyncGenerator[tqdm]:
-    """Async context manager for progress bar.
-
-    Args:
-        hashes: List of hashes being processed
-        dry_run: Whether in dry-run mode
-
-    Yields:
-        tqdm progress bar
-    """
+    """Async context manager for progress bar."""
     pbar = tqdm(total=len(hashes), desc="Generating DDL" if dry_run else "Deploying MVs", unit="hash")
     try:
         yield pbar
@@ -748,15 +489,7 @@ async def _create_progress_bar(
 
 
 def _format_batch_result(result: BatchResult, dry_run: bool) -> str:
-    """Format batch result for output.
-
-    Args:
-        result: Batch processing result
-        dry_run: Whether in dry-run mode
-
-    Returns:
-        Formatted output string
-    """
+    """Format batch result for output."""
     lines = [
         f"\n{'=' * 60}",
         f"MV Generation Summary ({'DRY RUN' if dry_run else 'LIVE'})",
@@ -792,37 +525,123 @@ def _format_batch_result(result: BatchResult, dry_run: bool) -> str:
     return "\n".join(lines)
 
 
-# Example query candidate (for testing)
-# In production, this would be fetched from a metadata table
-async def _example_query_candidate(query_hash: str) -> QueryCandidate | None:
-    """Create an example query candidate for testing.
+@app.command(name="generate-mv")
+@click.argument("query_hashes", nargs=-1)
+@click.option(
+    "--mv-prefix",
+    default="automv_",
+    help="Prefix for generated MV names",
+)
+@click.option(
+    "--name-scheme-version",
+    default="v1",
+    help="Naming scheme version (for future changes)",
+)
+@click.option(
+    "--refresh-interval-minutes",
+    default=60,
+    help="MV refresh interval in minutes",
+)
+@click.option(
+    "--no-refresh",
+    is_flag=True,
+    help="Disable automatic refresh",
+)
+@click.option(
+    "--replace",
+    is_flag=True,
+    help="Drop and recreate existing MVs",
+)
+@click.option(
+    "--enable-auto-cleanup",
+    is_flag=True,
+    help="Enable automatic cleanup of stale MVs",
+)
+@click.option(
+    "--from-file",
+    type=click.Path(path_type=Path),
+    help="Read query hashes from file (one per line)",
+)
+@click.option(
+    "--from-analyze",
+    type=click.Path(path_type=Path),
+    help="Read candidates from analyze output JSON file",
+)
+@click.option(
+    "--from-candidates-table",
+    is_flag=True,
+    help="Read candidates from BigQuery query_candidates table in target dataset",
+)
+@click.option(
+    "--candidates-table",
+    default="query_candidates",
+    help="Custom candidates table name (default: query_candidates)",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Output DDL without executing",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    help="Skip confirmation prompt",
+)
+@click.pass_context
+def generate_mv(
+    ctx: click.Context,
+    query_hashes: tuple[str, ...],
+    mv_prefix: str,
+    name_scheme_version: str,
+    refresh_interval_minutes: int,
+    no_refresh: bool,
+    replace: bool,
+    enable_auto_cleanup: bool,
+    from_file: Path | None,
+    from_analyze: Path | None,
+    from_candidates_table: bool,
+    candidates_table: str,
+    dry_run: bool,
+    yes: bool,
+) -> None:
+    """Generate and deploy materialized views for eligible queries.
 
-    This is a placeholder. In production, query candidates would be
-    fetched from a metadata table populated by the analyze command.
+    Creates optimized materialized views based on query analysis. Supports
+    dry-run mode for previewing DDL without execution.
+
+    Examples:
+        # Generate MV for a single query hash (dry run)
+        bq-automv generate-mv abc123 --dry-run
+
+        # Generate and deploy MV for multiple hashes
+        bq-automv generate-mv abc123 def456 --yes
+
+        # Read hashes from file
+        bq-automv generate-mv --from-file hashes.txt --yes
+
+        # Replace existing MV with new definition
+        bq-automv generate-mv abc123 --replace --yes
     """
-    # Return None to indicate not implemented
-    return None
+    common = ctx.obj["common"]
 
-
-def _print_error(message: str, as_json: bool, suggestion: str | None = None) -> None:
-    """Print error message to stderr.
-
-    Args:
-        message: Error message
-        as_json: Whether to format as JSON
-        suggestion: Optional suggestion for fixing the error
-    """
-    import json
-
-    if as_json:
-        error_data = {
-            "error": "GenerateMVError",
-            "message": message,
-        }
-        if suggestion:
-            error_data["suggestion"] = suggestion
-        print(json.dumps(error_data), file=sys.stderr)
-    else:
-        print(f"Error: {message}", file=sys.stderr)
-        if suggestion:
-            print(f"Suggestion: {suggestion}", file=sys.stderr)
+    # Run async command
+    result = asyncio.run(
+        _generate_mv_async(
+            query_hashes=list(query_hashes),
+            mv_prefix=mv_prefix,
+            name_scheme_version=name_scheme_version,
+            refresh_interval_minutes=refresh_interval_minutes,
+            no_refresh=no_refresh,
+            replace=replace,
+            enable_auto_cleanup=enable_auto_cleanup,
+            from_file=from_file,
+            from_analyze=from_analyze,
+            from_candidates_table=from_candidates_table,
+            candidates_table=candidates_table,
+            dry_run=dry_run or common.dry_run,
+            yes=yes,
+            common=common,
+        )
+    )
+    print(result)
