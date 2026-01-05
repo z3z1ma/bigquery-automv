@@ -383,28 +383,18 @@ def mv_apply(
                         )
 
                         # Initialize services
-                        smart_tuning_service = SmartTuningService(client=client)
+                        smart_tuning_service = SmartTuningService(bq_client=client)
                         mv_generator = MVGeneratorService(
                             bq_client=client,
                             smart_tuning_service=smart_tuning_service,
                             tool_version="1.5.0",
                         )
 
-                        # Build candidate object
-                        from bigquery_automv.models.candidate import QueryCandidate
+                        # Build candidate object from dict
+                        from bigquery_automv.models.query_candidate import QueryCandidate
 
-                        query_candidate = QueryCandidate(
-                            query_hash=captured_candidate.get("query_hash", ""),  # noqa: B023
-                            representative_query=captured_candidate.get(  # noqa: B023
-                                "representative_query",
-                                "",
-                            ),
-                            execution_count=captured_candidate.get("execution_count", 0),  # noqa: B023
-                            total_bytes_billed=captured_candidate.get(  # noqa: B023
-                                "total_bytes_billed",
-                                0,
-                            ),
-                            total_slot_ms=captured_candidate.get("total_slot_ms", 0),  # noqa: B023
+                        query_candidate = QueryCandidate.from_dict(
+                            captured_candidate,  # noqa: B023
                         )
 
                         # Generate MV artifact
@@ -448,7 +438,7 @@ def mv_apply(
                         await client.create_materialized_view(
                             mv_name=mv_short_name,
                             dataset_id=dataset_id,
-                            query=mv_artifact.ddl,
+                            query=mv_artifact.ddl_definition,
                             project_id=project_id,
                             enable_refresh=True,
                             refresh_interval_minutes=60,
