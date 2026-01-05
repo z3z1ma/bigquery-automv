@@ -262,6 +262,13 @@ class ImpactService:
                 mv_metadata.get("source_query_hash") if mv_metadata else None,
             )
 
+            # Calculate direct MV usage
+            direct_usage = await self._query_direct_mv_usage(
+                period_start,
+                period_end,
+                mv_name,
+            )
+
             # T101: Calculate savings
             savings = self._calculate_savings(
                 current_metrics=current_metrics,
@@ -293,7 +300,7 @@ class ImpactService:
                 dollars_saved_on_demand_equiv=savings["dollars_saved"],
                 matching_executions_count=matching_executions,
                 smart_tuning_usage_count=len(usage_jobs),
-                direct_query_count=0,  # TODO: Query direct MV usage
+                direct_query_count=direct_usage,
                 usage_percentage=savings["usage_percentage"],
                 attribution_method=attribution_method,
                 status=self._parse_mv_status(mv_metadata.get("status") if mv_metadata else "proposed"),
@@ -400,10 +407,22 @@ class ImpactService:
         Returns:
             List of MV names
         """
-        # For now, return empty list - metadata table integration is separate
-        # In production, this would query the automv_metadata table
-        # TODO: Implement metadata table query
-        return []
+        try:
+            # Query automv_metadata table for all MVs
+            sql = """
+                SELECT DISTINCT mv_name
+                FROM `{project}.{dataset}.automv_metadata`
+                WHERE status != 'dropped'
+            """.format(project=self._client.project_id, dataset=self._client.dataset_id or "automv_meta")
+
+            if mv_name_filter:
+                sql += f" AND mv_name LIKE '%{mv_name_filter}%'"
+
+            result = await self._client.run_query(sql)
+            return [row.get("mv_name", "") for row in result.rows] if result.rows else []
+        except Exception as e:
+            self._logger.warning(f"Failed to query metadata table: {e}")
+            return []
 
     async def _get_mv_metadata(self, mv_name: str) -> dict | None:
         """Get metadata for a specific materialized view.
@@ -414,9 +433,34 @@ class ImpactService:
         Returns:
             Metadata dictionary or None
         """
-        # Query metadata table for MV details
-        # For now, return None - metadata table integration is separate
-        return None
+        try:
+            # Extract table_id from mv_name
+            if mv_name.count(".") == 2:
+                _, _, table_id = mv_name.split(".")
+            elif mv_name.count(".") == 1:
+                _, table_id = mv_name.split(".")
+            else:
+                table_id = mv_name
+
+            # Query automv_metadata table for MV details
+            sql = """
+                SELECT *
+                FROM `{project}.{dataset}.automv_metadata`
+                WHERE mv_name = @mv_name
+                LIMIT 1
+            """.format(project=self._client.project_id, dataset=self._client.dataset_id or "automv_meta")
+
+            result = await self._client.run_query(
+                sql,
+                query_params=[("mv_name", "STRING", table_id)],
+            )
+
+            if result.rows and len(result.rows) > 0:
+                return result.rows[0]
+            return None
+        except Exception as e:
+            self._logger.warning(f"Failed to query MV metadata for {mv_name}: {e}")
+            return None
 
     async def _query_baseline_metrics(
         self,
@@ -486,6 +530,46 @@ class ImpactService:
             start_date=start_date,
             end_date=end_date,
             additional_filters=[f"query_info.query_hashes.normalized_literals = '{source_query_hash}'"],
+            project_filter=self._client.project_id,
+            statement_types=["SELECT"],
+        )
+
+        return len(result.rows) if result.rows else 0
+
+    async def _query_direct_mv_usage(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        mv_name: str,
+    ) -> int:
+        """Query direct MV usage (queries that directly SELECT from the MV).
+
+        Args:
+            start_date: Start of period
+            end_date: End of period
+            mv_name: Materialized view name
+
+        Returns:
+            Count of direct MV queries
+        """
+        # Extract table_id from mv_name for the filter
+        if mv_name.count(".") == 2:
+            _, _, table_id = mv_name.split(".")
+        elif mv_name.count(".") == 1:
+            _, table_id = mv_name.split(".")
+        else:
+            table_id = mv_name
+
+        # Build filter for direct MV references in FROM clause
+        # This checks if the query references the MV directly
+        from_pattern = f"REGEXP_CONTAINS(query, r'FROM[\\\\s]+`?{table_id}`?')"
+        join_pattern = f"REGEXP_CONTAINS(query, r'JOIN[\\\\s]+`?{table_id}`?')"
+        direct_filter = f"{from_pattern} OR {join_pattern}"
+
+        result = await self._client.query_information_schema_jobs(
+            start_date=start_date,
+            end_date=end_date,
+            additional_filters=[direct_filter],
             project_filter=self._client.project_id,
             statement_types=["SELECT"],
         )

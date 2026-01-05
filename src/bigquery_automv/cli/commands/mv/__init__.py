@@ -18,6 +18,7 @@ import click
 from bigquery_automv.cli.app import CommonConfig
 from bigquery_automv.cli.utils import confirm_destructive_action, should_prompt
 from bigquery_automv.lib.logging import setup_logging
+from bigquery_automv.services.bq_client import BigQueryClient as BigQueryClient
 
 
 @click.group(name="mv")
@@ -134,11 +135,25 @@ def mv_plan(
 
         logger.info(f"Loaded {len(candidates)} candidates from {input_file}")
 
-        # Create BigQuery client to check existing MVs
-        # Note: We'll implement list/query for existing MVs in the service layer
-        # For now, generate plan without checking existing MVs
+        # Import services for SQL generation
+        from bigquery_automv.models.query_candidate import QueryCandidate
+        from bigquery_automv.services.bq_client import BigQueryClient
+        from bigquery_automv.services.mv_generator import MVGeneratorService
+        from bigquery_automv.services.smart_tuning import SmartTuningService
 
-        # Generate plan actions
+        # Initialize BigQuery client and services
+        client = BigQueryClient(
+            project_id=project_id,
+            region=common.region,
+        )
+        smart_tuning_service = SmartTuningService(bq_client=client)
+        mv_generator = MVGeneratorService(
+            bq_client=client,
+            smart_tuning_service=smart_tuning_service,
+            tool_version="1.5.0",
+        )
+
+        # Generate plan actions with SQL
         plan_actions = []
         for candidate in candidates:
             query_hash = candidate.get("query_hash", "")
@@ -146,31 +161,74 @@ def mv_plan(
                 logger.warning(f"Skipping candidate with no query_hash: {candidate}")
                 continue
 
-            # Compute hashes
-            representative_query = candidate.get("representative_query", "")
-            family_hash = _compute_family_hash(representative_query)
-            signature_hash = _compute_signature_hash(representative_query)
+            # Skip ineligible candidates
+            smart_tuning_eligible = candidate.get("smart_tuning_eligible", False)
+            if not smart_tuning_eligible:
+                logger.info(f"Skipping ineligible candidate {query_hash}")
+                continue
 
-            # Generate MV name
-            mv_name = f"{mv_prefix}{family_hash}_{signature_hash[:8]}"
+            try:
+                # Build candidate object
+                query_candidate = QueryCandidate.from_dict(candidate)
 
-            # Determine action
-            # For now, always create - in production we'd check if MV exists
-            # and compare family/signature hashes to determine replace/keep/skip
-            action = "create"
+                # Generate MV artifact to get the actual SQL
+                mv_artifact = asyncio.run(
+                    mv_generator.generate_mv_artifact(
+                        candidate=query_candidate,
+                        target_dataset=dataset_id,
+                        target_project=project_id,
+                        mv_prefix=mv_prefix,
+                        refresh_interval_minutes=refresh_interval_minutes,
+                        enable_refresh=True,
+                    )
+                )
 
-            plan_actions.append(
-                {
-                    "action": action,
-                    "query_hash": query_hash,
-                    "mv_name": mv_name,
-                    "family_hash": family_hash,
-                    "signature_hash": signature_hash,
-                    "dataset_id": dataset_id,
-                    "candidate": candidate,
-                    "refresh_interval_minutes": refresh_interval_minutes,
-                }
-            )
+                # Compute hashes
+                representative_query = candidate.get("representative_query", "")
+                family_hash = _compute_family_hash(representative_query)
+                signature_hash = _compute_signature_hash(representative_query)
+
+                # Determine action
+                # For now, always create - in production we'd check if MV exists
+                # and compare family/signature hashes to determine replace/keep/skip
+                action = "create"
+
+                plan_actions.append(
+                    {
+                        "action": action,
+                        "query_hash": query_hash,
+                        "mv_name": mv_artifact.mv_name,
+                        "family_hash": family_hash,
+                        "signature_hash": signature_hash,
+                        "dataset_id": dataset_id,
+                        "candidate": candidate,
+                        "refresh_interval_minutes": refresh_interval_minutes,
+                        # IMPORTANT: Include the actual SQL that will be run
+                        "mv_sql": mv_artifact.mv_query,
+                        "mv_ddl": mv_artifact.ddl_definition,  # Full DDL for reference
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"Failed to generate SQL for candidate {query_hash}: {e}")
+                # Still include the action but mark as failed
+                representative_query = candidate.get("representative_query", "")
+                family_hash = _compute_family_hash(representative_query)
+                signature_hash = _compute_signature_hash(representative_query)
+                mv_name = f"{mv_prefix}{family_hash}_{signature_hash[:8]}"
+
+                plan_actions.append(
+                    {
+                        "action": "skip",
+                        "query_hash": query_hash,
+                        "mv_name": mv_name,
+                        "family_hash": family_hash,
+                        "signature_hash": signature_hash,
+                        "dataset_id": dataset_id,
+                        "candidate": candidate,
+                        "refresh_interval_minutes": refresh_interval_minutes,
+                        "error": str(e),
+                    }
+                )
 
         # Build summary
         summary = {
@@ -179,6 +237,7 @@ def mv_plan(
             "keep": sum(1 for a in plan_actions if a["action"] == "keep"),
             "skip": sum(1 for a in plan_actions if a["action"] == "skip"),
             "drop": sum(1 for a in plan_actions if a["action"] == "drop"),
+            "error": sum(1 for a in plan_actions if "error" in a),
             "total": len(plan_actions),
         }
 
@@ -281,6 +340,12 @@ def mv_plan(
     default=None,
     help="Dry run mode (show what would be done without making changes)",
 )
+@click.option(
+    "--auto-apply",
+    is_flag=True,
+    default=False,
+    help="Automatically apply without interactive confirmation (useful for AI/automation)",
+)
 @click.pass_context
 def mv_apply(
     ctx: click.Context,
@@ -289,6 +354,7 @@ def mv_apply(
     dataset_id: str,
     action_filter: str | None,
     dry_run: bool | None = None,
+    auto_apply: bool = False,
 ) -> None:
     """Apply a materialized view plan."""
     common = _get_common_config(ctx)
@@ -298,6 +364,10 @@ def mv_apply(
     if dry_run is not None:
         common.dry_run = dry_run
 
+    # --auto-apply disables interactive mode
+    if auto_apply:
+        common.interactive = False
+
     logger = setup_logging(common)
 
     try:
@@ -306,6 +376,8 @@ def mv_apply(
             plan = json.load(f)
 
         actions = plan.get("actions", [])
+        # Extract mv_prefix from plan metadata (fallback to "automv_" for backward compatibility)
+        mv_prefix = plan.get("metadata", {}).get("mv_prefix", "automv_")
         if not actions:
             formatter.success(
                 command="mv.apply",
@@ -362,27 +434,22 @@ def mv_apply(
                             logger.info(f"Would replace {dataset_id}.{mv_name}")
                         continue
 
-                    # Actual MV creation
-                    # Get services from context (they should be available via app initialization)
-                    from bigquery_automv.services.bq_client import BigQueryClient
-                    from bigquery_automv.services.mv_generator import MVGeneratorService
-                    from bigquery_automv.services.smart_tuning import SmartTuningService
+                    # Check if action has pre-generated SQL from plan (preferred)
+                    # If mv_sql exists in action, use it directly instead of regenerating
+                    mv_sql = action.get("mv_sql")
+                    if not mv_sql:
+                        # Fallback: regenerate SQL if not in plan
+                        # This shouldn't happen with new plans, but provides backward compatibility
+                        from bigquery_automv.models.query_candidate import QueryCandidate
+                        from bigquery_automv.services.bq_client import BigQueryClient
+                        from bigquery_automv.services.mv_generator import MVGeneratorService
+                        from bigquery_automv.services.smart_tuning import SmartTuningService
 
-                    # Capture loop variables to avoid closure issues
-                    captured_candidate = candidate
-                    captured_action = action
-                    captured_mv_name = mv_name
-                    captured_action_type = action_type
-
-                    # Create async runner
-                    async def create_mv():  # noqa: B023
-                        # Initialize BigQuery client
+                        # Initialize services for regeneration
                         client = BigQueryClient(
                             project_id=project_id,
                             region=common.region,
                         )
-
-                        # Initialize services
                         smart_tuning_service = SmartTuningService(bq_client=client)
                         mv_generator = MVGeneratorService(
                             bq_client=client,
@@ -390,58 +457,83 @@ def mv_apply(
                             tool_version="1.5.0",
                         )
 
-                        # Build candidate object from dict
-                        from bigquery_automv.models.query_candidate import QueryCandidate
-
-                        query_candidate = QueryCandidate.from_dict(
-                            captured_candidate,  # noqa: B023
+                        query_candidate = QueryCandidate.from_dict(candidate)
+                        mv_artifact = asyncio.run(
+                            mv_generator.generate_mv_artifact(
+                                candidate=query_candidate,
+                                target_dataset=dataset_id,
+                                target_project=project_id,
+                                mv_prefix=mv_prefix,
+                                refresh_interval_minutes=action.get("refresh_interval_minutes", 60),
+                                enable_refresh=True,
+                            )
                         )
+                        mv_sql = mv_artifact.mv_query
 
-                        # Generate MV artifact
-                        mv_artifact = await mv_generator.generate_mv_artifact(
-                            candidate=query_candidate,
-                            target_dataset=dataset_id,
-                            target_project=project_id,
-                            mv_prefix="",
-                            refresh_interval_minutes=60,
-                            enable_refresh=True,
+                    # Capture loop variables BEFORE function definition to avoid closure issues
+                    captured_action = action
+                    captured_mv_name = mv_name
+                    captured_action_type = action_type
+                    captured_refresh_interval_minutes = action.get("refresh_interval_minutes", 60)
+                    captured_project_id = project_id
+                    captured_dataset_id = dataset_id
+                    captured_region = common.region
+
+                    # Create async runner
+                    async def create_mv(  # noqa: B023
+                        captured_action_captured=captured_action,
+                        captured_mv_sql_captured=mv_sql,
+                        captured_mv_name_captured=captured_mv_name,
+                        captured_action_type_captured=captured_action_type,
+                        captured_refresh_interval_minutes_captured=captured_refresh_interval_minutes,
+                        captured_project_id_captured=captured_project_id,
+                        captured_dataset_id_captured=captured_dataset_id,
+                        captured_region_captured=captured_region,
+                    ):
+                        # Import BigQueryClient inside the function to avoid closure issues
+                        from bigquery_automv.services.bq_client import BigQueryClient
+
+                        # Initialize BigQuery client
+                        client = BigQueryClient(
+                            project_id=captured_project_id_captured,
+                            region=captured_region_captured,
                         )
 
                         # Prepare labels
                         labels = {
                             "automv_managed": "true",
-                            "automv_family_hash": captured_action.get("family_hash", ""),  # noqa: B023
-                            "automv_signature_hash": captured_action.get(  # noqa: B023
+                            "automv_family_hash": captured_action_captured.get("family_hash", ""),
+                            "automv_signature_hash": captured_action_captured.get(
                                 "signature_hash",
                                 "",
                             ),
-                            "automv_version": "1.5.0",
+                            "automv_version": "1_5_0",  # BigQuery labels cannot contain dots
                         }
 
                         # Strip "dataset." prefix from mv_name if present
-                        mv_short_name = captured_mv_name.replace(  # noqa: B023
-                            f"{dataset_id}.",
+                        mv_short_name = captured_mv_name_captured.replace(
+                            f"{captured_dataset_id_captured}.",
                             "",
                         )
 
                         # Create or replace MV
-                        if captured_action_type == "replace":  # noqa: B023
+                        if captured_action_type_captured == "replace":
                             # Drop existing MV first
                             await client.drop_materialized_view(
                                 mv_name=mv_short_name,
-                                dataset_id=dataset_id,
-                                project_id=project_id,
+                                dataset_id=captured_dataset_id_captured,
+                                project_id=captured_project_id_captured,
                                 if_exists=True,
                             )
 
                         # Create MV with labels
                         await client.create_materialized_view(
                             mv_name=mv_short_name,
-                            dataset_id=dataset_id,
-                            query=mv_artifact.ddl_definition,
-                            project_id=project_id,
+                            dataset_id=captured_dataset_id_captured,
+                            query=captured_mv_sql_captured,  # Use SQL from plan or regenerated
+                            project_id=captured_project_id_captured,
                             enable_refresh=True,
-                            refresh_interval_minutes=60,
+                            refresh_interval_minutes=captured_refresh_interval_minutes_captured,
                             labels=labels,
                         )
 
@@ -535,21 +627,48 @@ def mv_list(
     logger = setup_logging(common)
 
     try:
-        # Note: This is a placeholder implementation
-        # In production, this would query INFORMATION_SCHEMA.MATERIALIZED_VIEWS
-        # and filter by labels if --managed-only
+        from bigquery_automv.services.bq_client import BigQueryClient
 
-        formatter.emit_warning("MV list not yet fully implemented")
-        formatter.emit_warning(
-            "Use BigQuery UI or `bq query 'SELECT * FROM region-us.INFORMATION_SCHEMA.MATERIALIZED_VIEWS'`"
+        # Create BigQuery client
+        client = BigQueryClient(
+            project_id=project_id,
+            region=common.region,
         )
 
-        # Placeholder response
-        mvs = []
+        # Build label filter for automv-managed MVs
+        label_filter = {"automv_managed": "true"} if managed_only else None
+
+        # List MVs in the specified dataset(s)
         if dataset_id:
-            logger.info(f"Would list MVs in {project_id}.{dataset_id}")
+            mvs_data = asyncio.run(
+                client.list_materialized_views(
+                    dataset_id=dataset_id,
+                    project_id=project_id,
+                    label_filter=label_filter,
+                )
+            )
         else:
-            logger.info(f"Would list MVs in all datasets in {project_id}")
+            # If no dataset specified, we need to list datasets or return error
+            # For now, return empty list with message
+            mvs_data = []
+            formatter.emit_warning("Dataset ID required for listing MVs")
+
+        # Format response
+        mvs = [
+            {
+                "name": mv["table_id"],
+                "dataset": mv["dataset_id"],
+                "project": mv["project_id"],
+                "full_name": mv["full_name"],
+                "labels": mv.get("labels", {}),
+                "num_bytes": mv.get("num_bytes", 0),
+                "num_rows": mv.get("num_rows", 0),
+                "last_refresh_time": mv.get("last_refresh_time"),
+            }
+            for mv in mvs_data
+        ]
+
+        logger.info(f"Listed {len(mvs)} materialized views")
 
         formatter.success(
             command="mv.list",
@@ -592,21 +711,49 @@ def mv_get(
     logger = setup_logging(common)
 
     try:
-        # Note: This is a placeholder implementation
-        # In production, this would query BigQuery to get MV details
+        from bigquery_automv.services.bq_client import BigQueryClient
 
-        formatter.emit_warning("MV get not yet fully implemented")
+        # Parse mv_name to extract dataset and table
+        # Expected formats: "dataset.mv_name" or "project.dataset.mv_name" or "mv_name"
+        parts = mv_name.split(".")
+        if len(parts) == 3:
+            # project.dataset.table
+            project_id = parts[0]
+            dataset_id = parts[1]
+            table_id = parts[2]
+        elif len(parts) == 2:
+            # dataset.table
+            dataset_id = parts[0]
+            table_id = parts[1]
+        else:
+            # table only - need dataset from somewhere else
+            formatter.error(
+                error_type="ValueError",
+                code="INVALID_MV_NAME",
+                message=f"MV name must be in format 'dataset.mv_name' or 'project.dataset.mv_name', got: {mv_name}",
+                command="mv.get",
+                target=mv_name,
+            )
+            sys.exit(1)
 
-        # Placeholder response
+        # Create BigQuery client
+        client = BigQueryClient(
+            project_id=project_id,
+            region=common.region,
+        )
+
+        # Get MV details
+        mv_data = asyncio.run(
+            client.get_materialized_view(
+                mv_name=table_id,
+                dataset_id=dataset_id,
+                project_id=project_id,
+            )
+        )
+
         formatter.success(
             command="mv.get",
-            data={
-                "mv": {
-                    "name": mv_name,
-                    "project_id": project_id,
-                    "note": "Full implementation pending",
-                }
-            },
+            data={"mv": mv_data},
             target=mv_name,
         )
 
@@ -642,6 +789,27 @@ def mv_drop(
     logger = setup_logging(common)
 
     try:
+        from bigquery_automv.services.bq_client import BigQueryClient
+
+        # Parse mv_name to extract dataset and table
+        parts = mv_name.split(".")
+        if len(parts) == 3:
+            project_id = parts[0]
+            dataset_id = parts[1]
+            table_id = parts[2]
+        elif len(parts) == 2:
+            dataset_id = parts[0]
+            table_id = parts[1]
+        else:
+            formatter.error(
+                error_type="ValueError",
+                code="INVALID_MV_NAME",
+                message=f"MV name must be in format 'dataset.mv_name' or 'project.dataset.mv_name', got: {mv_name}",
+                command="mv.drop",
+                target=mv_name,
+            )
+            sys.exit(1)
+
         # Confirm if interactive
         if should_prompt(common.interactive, common.json):
             if not confirm_destructive_action(
@@ -652,14 +820,23 @@ def mv_drop(
                 formatter.emit_warning("Drop cancelled by user")
                 sys.exit(0)
 
-        # Note: This is a placeholder implementation
-        # In production, this would use BigQueryClient.drop_materialized_view()
-
-        if not common.dry_run:
-            formatter.emit_warning("MV drop not yet fully implemented")
-            formatter.emit_warning("Use `bq rm -mv <mv_name>` to drop MVs")
-        else:
+        if common.dry_run:
             logger.info(f"Would drop {mv_name}")
+        else:
+            # Create BigQuery client and drop MV
+            client = BigQueryClient(
+                project_id=project_id,
+                region=common.region,
+            )
+            asyncio.run(
+                client.drop_materialized_view(
+                    mv_name=table_id,
+                    dataset_id=dataset_id,
+                    project_id=project_id,
+                    if_exists=True,
+                )
+            )
+            logger.info(f"Dropped {mv_name}")
 
         formatter.success(
             command="mv.drop",
@@ -718,18 +895,59 @@ def mv_gc(
     logger = setup_logging(common)
 
     try:
-        # Note: This is a placeholder implementation
-        # In production, this would:
-        # 1. Query MV usage statistics from INFORMATION_SCHEMA.JOBS
-        # 2. Find MVs with no usage in the specified period
-        # 3. Optionally drop them if --drop is set
+        from bigquery_automv.services.bq_client import BigQueryClient
+        from bigquery_automv.services.impact import ImpactService
 
-        formatter.emit_warning("MV gc not yet fully implemented")
+        # Create BigQuery client and Impact service
+        client = BigQueryClient(
+            project_id=project_id,
+            region=common.region,
+        )
+        impact_service = ImpactService(client=client)
 
-        # Placeholder response
+        # Get all MVs in the dataset
+        if not dataset_id:
+            formatter.error(
+                error_type="ValueError",
+                code="MISSING_DATASET",
+                message="Dataset ID is required for garbage collection",
+                command="mv.gc",
+                target=project_id,
+            )
+            sys.exit(1)
+
+        # List MVs in dataset
+        mvs_data = asyncio.run(
+            client.list_materialized_views(
+                dataset_id=dataset_id,
+                project_id=project_id,
+            )
+        )
+
+        # Find unused MVs (no usage in the specified period)
         unused_mvs = []
 
-        if drop and not common.dry_run:
+        for mv in mvs_data:
+            mv_full_name = mv["full_name"]
+            # Get usage stats for this MV
+            stats = asyncio.run(
+                impact_service.get_mv_usage_stats(
+                    mv_name=mv_full_name,
+                    days=days_idle,
+                )
+            )
+
+            # If no queries in the period, consider it unused
+            if stats["query_count"] == 0:
+                unused_mvs.append(
+                    {
+                        "mv_name": mv_full_name,
+                        "days_since_last_use": None,  # No last_used data
+                    }
+                )
+
+        dropped_mvs = []
+        if drop and not common.dry_run and unused_mvs:
             # Confirm if interactive
             if should_prompt(common.interactive, common.json):
                 if not confirm_destructive_action(
@@ -740,14 +958,42 @@ def mv_gc(
                     formatter.emit_warning("GC cancelled by user")
                     sys.exit(0)
 
+            # Drop unused MVs
+            for mv in unused_mvs:
+                parts = mv["mv_name"].split(".")
+                if len(parts) >= 3:
+                    mv_project_id = parts[0]
+                    mv_dataset_id = parts[1]
+                    mv_table_id = parts[2]
+                elif len(parts) == 2:
+                    mv_project_id = project_id
+                    mv_dataset_id = parts[0]
+                    mv_table_id = parts[1]
+                else:
+                    continue
+
+                try:
+                    asyncio.run(
+                        client.drop_materialized_view(
+                            mv_name=mv_table_id,
+                            dataset_id=mv_dataset_id,
+                            project_id=mv_project_id,
+                            if_exists=True,
+                        )
+                    )
+                    dropped_mvs.append(mv["mv_name"])
+                    logger.info(f"Dropped unused MV: {mv['mv_name']}")
+                except Exception as e:
+                    logger.warning(f"Failed to drop {mv['mv_name']}: {e}")
+
         formatter.success(
             command="mv.gc",
             data={
                 "unused_mvs": unused_mvs,
                 "count": len(unused_mvs),
-                "dropped": [] if not (drop and not common.dry_run) else [mv["mv_name"] for mv in unused_mvs],
+                "dropped": dropped_mvs,
             },
-            target=f"{project_id}.{dataset_id}" if dataset_id else project_id,
+            target=f"{project_id}.{dataset_id}",
             meta={"dry_run": common.dry_run or not drop},
         )
 
@@ -790,23 +1036,34 @@ def mv_stats(
     logger = setup_logging(common)
 
     try:
-        # Note: This is a placeholder implementation
-        # In production, this would query INFORMATION_SCHEMA.JOBS
-        # to get MV usage statistics
+        from bigquery_automv.services.bq_client import BigQueryClient
+        from bigquery_automv.services.impact import ImpactService
 
-        formatter.emit_warning("MV stats not yet fully implemented")
+        # Create BigQuery client and Impact service
+        client = BigQueryClient(
+            project_id=project_id,
+            region=common.region,
+        )
+        impact_service = ImpactService(client=client)
 
-        # Placeholder response
+        # Get usage stats for the MV
+        stats = asyncio.run(
+            impact_service.get_mv_usage_stats(
+                mv_name=mv_name,
+                days=days,
+            )
+        )
+
         formatter.success(
             command="mv.stats",
             data={
                 "mv_name": mv_name,
                 "period_days": days,
-                "query_count": 0,
-                "total_slot_ms": 0,
-                "first_used": None,
-                "last_used": None,
-                "note": "Full implementation pending",
+                "query_count": stats["query_count"],
+                "total_slot_ms": stats["total_slot_ms"],
+                "total_bytes_processed": stats["total_bytes_processed"],
+                "first_used": stats["first_used"],
+                "last_used": stats["last_used"],
             },
             target=mv_name,
         )

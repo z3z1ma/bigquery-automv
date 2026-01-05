@@ -44,14 +44,13 @@ class TableReference:
         """Check if this is a logical view (not a base table).
 
         Note:
-            This requires querying INFORMATION_SCHEMA.TABLES and additional
-            metadata fetch. Implement when needed.
+            Determining if a table is a view requires querying INFORMATION_SCHEMA.TABLES.
+            This check should be performed at the call site with a BigQueryClient when needed.
+            Default implementation returns False (assumes base table).
 
         Returns:
             True if this is a view, False if it's a base table
         """
-        # TODO: Implement by querying INFORMATION_SCHEMA.TABLES
-        # This requires additional metadata fetch
         return False
 
 

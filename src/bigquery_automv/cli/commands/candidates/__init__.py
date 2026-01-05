@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import io
 import json
 import sys
 from datetime import date, datetime
@@ -185,9 +186,20 @@ async def _persist_candidates(
                     }
                     for t in candidate.referenced_tables
                 ],
+                # Query structure fields (needed for MV generation)
+                "has_aggregations": candidate.has_aggregations,
+                "aggregation_functions": candidate.aggregation_functions,
+                "join_types": candidate.join_types,
+                "has_ctes": candidate.has_ctes,
+                "has_distinct": candidate.has_distinct,
+                "locked_predicates": candidate.locked_predicates,
+                "lifted_columns": candidate.lifted_columns,
+                # Eligibility fields
                 "smart_tuning_eligible": candidate.smart_tuning_eligible,
                 "eligibility_basis": candidate.eligibility_basis,
                 "smart_tuning_reasons": candidate.smart_tuning_reasons or [],
+                "impacted_users": candidate.impacted_users,
+                # Analysis metadata
                 "analysis_start_date": start_datetime.isoformat(),
                 "analysis_end_date": end_datetime.isoformat(),
             }
@@ -229,8 +241,19 @@ def _format_candidate_dict(candidate) -> dict:
             }
             for t in candidate.referenced_tables
         ],
+        # Query structure fields (needed for MV generation)
+        "has_aggregations": candidate.has_aggregations,
+        "aggregation_functions": candidate.aggregation_functions,
+        "join_types": candidate.join_types,
+        "has_ctes": candidate.has_ctes,
+        "has_distinct": candidate.has_distinct,
+        "locked_predicates": candidate.locked_predicates,
+        "lifted_columns": candidate.lifted_columns,
+        # Eligibility fields
         "smart_tuning_eligible": candidate.smart_tuning_eligible,
         "eligibility_basis": candidate.eligibility_basis,
+        "smart_tuning_reasons": candidate.smart_tuning_reasons,
+        "impacted_users": candidate.impacted_users,
     }
 
 
@@ -414,8 +437,6 @@ def candidates_discover(
                 if output.suffix.lower() == ".json":
                     output.write_text(json.dumps(output_data, indent=2))
                 elif output.suffix.lower() == ".csv":
-                    import io
-
                     output_file = io.StringIO()
                     fieldnames = candidates_data[0].keys() if candidates_data else []
                     writer = csv.DictWriter(output_file, fieldnames=fieldnames)
@@ -791,8 +812,6 @@ def candidates_prune(
             if output_file.suffix.lower() == ".json":
                 output_file.write_text(json.dumps(output_data, indent=2))
             elif output_file.suffix.lower() == ".csv":
-                import io
-
                 output_str = io.StringIO()
                 if pruned:
                     writer = csv.DictWriter(output_str, fieldnames=pruned[0].keys())

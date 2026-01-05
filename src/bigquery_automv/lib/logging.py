@@ -77,7 +77,15 @@ def setup_logging(config: CommonConfig | None = None) -> logging.Logger:
         Configured logger instance.
     """
     if config is None:
-        config = CommonConfig()
+        config = CommonConfig(
+            project="",
+            region="US",
+            dataset="",
+            dry_run=False,
+            verbose=False,
+            json=False,
+            interactive=None,
+        )
 
     # Determine log level
     log_level = logging.DEBUG if config.verbose else logging.INFO

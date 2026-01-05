@@ -130,6 +130,7 @@ class MaterializedViewArtifact:
 
     # Definition
     ddl_definition: str
+    mv_query: str  # Raw SELECT query (without CREATE statement), for passing to bq_client
     base_tables: list["TableReference"]  # noqa: UP037
 
     # Configuration

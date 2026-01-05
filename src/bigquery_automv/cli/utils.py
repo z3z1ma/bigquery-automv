@@ -10,6 +10,8 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING
 
+import click
+
 if TYPE_CHECKING:
     from bigquery_automv.cli.io import OutputFormatter
 
@@ -100,8 +102,6 @@ def confirm_destructive_action(
 
     # Interactive prompt
     try:
-        import click
-
         return click.confirm(message, default=default)
     except (EOFError, KeyboardInterrupt):
         # User aborted

@@ -535,8 +535,8 @@ class BigQueryClient:
         ]
 
         if labels:
-            labels_str = ", ".join(f'"{k}" = "{v}"' for k, v in labels.items())
-            options.append(f"labels = ({labels_str})")
+            labels_str = ", ".join(f'STRUCT("{k}", "{v}")' for k, v in labels.items())
+            options.append(f"labels = [{labels_str}]")
 
         ddl_parts = [
             "CREATE MATERIALIZED VIEW",

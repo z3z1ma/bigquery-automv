@@ -346,11 +346,11 @@ class AnalyzerService:
 
                 # Get time range
                 first_seen = min(
-                    (j.get("creation_time") for j in sub_group_jobs if j.get("creation_time")),
+                    (j.get("creation_time") for j in sub_group_jobs if j.get("creation_time") is not None),
                     default=datetime.now(),
                 )
                 last_seen = max(
-                    (j.get("creation_time") for j in sub_group_jobs if j.get("creation_time")),
+                    (j.get("creation_time") for j in sub_group_jobs if j.get("creation_time") is not None),
                     default=datetime.now(),
                 )
 

@@ -178,17 +178,64 @@ class MVGeneratorService:
             else eligibility_result.recommended_mv_filters
         )
 
+        # Handle parameterized queries: extract columns from predicates with `?` placeholders
+        # These columns must be lifted into the projection since we can't include `?` in MV DDL
+        parameterized_columns = []
+        filtered_predicates = []
+        for pred in shared_predicates:
+            if "?" in pred:
+                # Extract column name from predicate (e.g., "`pipeline_name` = ?" -> "pipeline_name")
+                # Handle common patterns: column = ?, column = ? AND ..., ? = column
+                import re
+
+                # Pattern 1: `column` = ?
+                # Pattern 2: column = ?
+                # Pattern 3: ? = column (less common)
+                matches = re.findall(r"`([^`]+)`\s*=\s*\?", pred)
+                if not matches:
+                    matches = re.findall(r"(\w+)\s*=\s*\?", pred)
+                if not matches:
+                    # Try reversed pattern
+                    matches = re.findall(r"\?\s*=\s*`?([^`]+)`?", pred)
+                    if not matches:
+                        matches = re.findall(r"\?\s*=\s*(\w+)", pred)
+
+                parameterized_columns.extend([f"`{col}`" if not col.startswith("`") else col for col in matches])
+            else:
+                filtered_predicates.append(pred)
+
+        shared_predicates = filtered_predicates
+
+        # Add parameterized columns to lifted_columns if not already present
+        if parameterized_columns:
+            # Ensure candidate.lifted_columns is a list we can modify
+            lifted_columns_list = list(candidate.lifted_columns) if candidate.lifted_columns else []
+            for col in parameterized_columns:
+                if col not in lifted_columns_list:
+                    lifted_columns_list.append(col)
+            # Update the candidate's lifted_columns (create new list since it's a frozen dataclass)
+            # Note: We can't modify the candidate directly, so we track this separately
+            # and add to group_by_expressions and select_expressions below
+            parameterized_lifted_columns = lifted_columns_list
+        else:
+            parameterized_lifted_columns = []
+
         group_by_expressions = list(eligibility_result.recommended_mv_group_by)
         select_expressions = list(eligibility_result.recommended_mv_select)
 
+        # Add parameterized columns to GROUP BY and SELECT
+        for col in parameterized_lifted_columns:
+            if col not in group_by_expressions:
+                group_by_expressions.append(col)
+            # Check if column is already in SELECT (simple check)
+            if not any(col in expr for expr in select_expressions):
+                select_expressions.append(col)
+
+        # Also add to candidate's lifted_columns for future reference
         if candidate.lifted_columns:
-            # Add lifted columns to GROUP BY and SELECT
             for col in candidate.lifted_columns:
                 if col not in group_by_expressions:
                     group_by_expressions.append(col)
-
-                # Check if column is already in SELECT (simple check)
-                # In production, this might need better parsing to handle aliases
                 if not any(col in expr for expr in select_expressions):
                     select_expressions.append(col)
 
@@ -212,15 +259,19 @@ class MVGeneratorService:
         )
 
         # Check optimization value of the FINAL query (T097)
+        # This validation must match the analyzer's identity MV check (analyzer.py:396-410)
         self._validate_mv_value(
             shared_predicates=shared_predicates,
             group_by_expressions=group_by_expressions,
             select_expressions=select_expressions,
             query_hash=candidate.query_hash,
+            has_ctes=candidate.has_ctes,
+            join_types=candidate.join_types,
         )
 
         # Build DDL with recommended structure from Smart Tuning
-        ddl = self._generate_ddl(
+        # Pass representative_query to preserve JOINs, CTEs, subqueries, etc.
+        ddl, mv_query = self._generate_ddl(
             mv_name=mv_name,
             signature_hash=signature_hash_short,
             project=target_project,
@@ -233,6 +284,8 @@ class MVGeneratorService:
             refresh_interval_minutes=refresh_interval_minutes,
             query_hash=candidate.query_hash,
             eligibility_basis=eligibility_result.eligibility_basis,
+            representative_query=candidate.representative_query,
+            parameterized_columns=parameterized_lifted_columns,
         )
 
         # Get region from target dataset
@@ -250,6 +303,7 @@ class MVGeneratorService:
             dataset_id=target_dataset,
             mv_region=mv_region,
             ddl_definition=ddl,
+            mv_query=mv_query,
             base_tables=candidate.referenced_tables,
             refresh_interval_minutes=refresh_interval_minutes,
             enable_refresh=enable_refresh,
@@ -309,7 +363,9 @@ class MVGeneratorService:
         refresh_interval_minutes: int,
         query_hash: str,
         eligibility_basis: str,
-    ) -> str:
+        representative_query: str | None = None,
+        parameterized_columns: list[str] | None = None,
+    ) -> tuple[str, str]:
         """T073: Generate CREATE MATERIALIZED VIEW DDL with OPTIONS.
 
         Args:
@@ -325,9 +381,11 @@ class MVGeneratorService:
             refresh_interval_minutes: Refresh interval in minutes
             query_hash: Source query hash
             eligibility_basis: "stable" or "preview"
+            representative_query: Optional original query to preserve structure (JOINs/CTEs)
+            parameterized_columns: Columns from `?` placeholders (must be in projection)
 
         Returns:
-            Complete DDL with header comments
+            Tuple of (complete DDL with header comments, raw MV query SQL)
         """
         # Build header comments (T092)
         header_lines = [
@@ -340,21 +398,31 @@ class MVGeneratorService:
             f"-- Eligibility Basis: {eligibility_basis}",
         ]
 
-        # Build SELECT clause
-        select_clause = ",\n    ".join(select_expressions)
+        # Build MV query - prefer representative query to preserve structure
+        if representative_query:
+            # Use AST-based approach to preserve JOINs, CTEs, subqueries
+            mv_query = self._build_mv_query_from_representative(
+                representative_query=representative_query,
+                shared_predicates=shared_predicates,
+                parameterized_columns=parameterized_columns or [],
+            )
+        else:
+            # Fallback: Build query from scratch (loses JOINs, CTEs, etc.)
+            # Build SELECT clause
+            select_clause = ",\n    ".join(select_expressions)
 
-        # Build WHERE clause
-        where_clause = ""
-        if shared_predicates:
-            where_clause = "WHERE " + " AND ".join(shared_predicates)
+            # Build WHERE clause
+            where_clause = ""
+            if shared_predicates:
+                where_clause = "WHERE " + " AND ".join(shared_predicates)
 
-        # Build GROUP BY clause
-        group_by_clause = ""
-        if group_by_expressions:
-            group_by_clause = "GROUP BY " + ", ".join(group_by_expressions)
+            # Build GROUP BY clause
+            group_by_clause = ""
+            if group_by_expressions:
+                group_by_clause = "GROUP BY " + ", ".join(group_by_expressions)
 
-        # Build full MV query
-        mv_query = f"""SELECT {select_clause}
+            # Build full MV query
+            mv_query = f"""SELECT {select_clause}
 FROM {base_table}
 {where_clause}
 {group_by_clause}""".strip()
@@ -374,7 +442,7 @@ FROM {base_table}
             f"AS\n{mv_query};",
         ]
 
-        return "\n".join(ddl_parts)
+        return "\n".join(ddl_parts), mv_query
 
     def _get_primary_base_table(self, candidate: QueryCandidate) -> str:
         """Get primary base table for MV query.
@@ -619,14 +687,23 @@ FROM {base_table}
     ) -> str:
         """Build MV query SQL (without CREATE statement).
 
+        WARNING: This method builds a simplified query structure and does NOT preserve:
+        - JOINs between multiple tables
+        - CTEs (Common Table Expressions)
+        - Subqueries
+        - Complex query structures
+
+        For queries with these features, consider using the representative query
+        directly with modifications instead of building from scratch.
+
         Args:
             select_expressions: SELECT expressions for MV
-            base_table: Primary base table reference
+            base_table: Primary base table reference (first table only)
             shared_predicates: Shared predicates for WHERE clause
             group_by_expressions: GROUP BY expressions (empty if no aggregation)
 
         Returns:
-            MV query SQL string
+            Simplified MV query SQL string
         """
         # Build SELECT clause
         select_clause = ",\n    ".join(select_expressions)
@@ -646,6 +723,93 @@ FROM {base_table}
 FROM {base_table}
 {where_clause}
 {group_by_clause}""".strip()
+
+        return mv_query
+
+    def _build_mv_query_from_representative(
+        self,
+        *,
+        representative_query: str,
+        shared_predicates: list[str],
+        parameterized_columns: list[str],
+    ) -> str:
+        """Build MV query by modifying representative query AST in-place.
+
+        This method preserves the original query structure including:
+        - JOINs between multiple tables
+        - CTEs (Common Table Expressions)
+        - Subqueries
+        - Complex query structures
+
+        It modifies the query by removing predicates with `?` placeholders from
+        the WHERE clause, since MVs cannot include parameterized filters.
+
+        Args:
+            representative_query: The original query SQL to use as template
+            shared_predicates: Predicates to keep in WHERE (without `?` placeholders)
+            parameterized_columns: Columns that had `?` placeholders (must be in projection)
+
+        Returns:
+            MV query SQL string with preserved structure
+
+        Raises:
+            MVGenerationError: If query parsing fails
+        """
+        from sqlglot import exp, parse_one
+
+        try:
+            # Parse the representative query
+            ast = parse_one(representative_query, dialect="bigquery")
+        except Exception as e:
+            raise MVGenerationError(
+                f"Failed to parse representative query: {e}",
+                reason="parse_failed",
+                query_hash="",
+            ) from e
+
+        # Remove predicates with `?` placeholders from WHERE clause
+        # We do this by reconstructing the WHERE clause without those predicates
+        where_clause = ast.find(exp.Where)
+        if where_clause:
+            # Build new WHERE clause with only shared_predicates (no `?` placeholders)
+            if shared_predicates:
+                # Parse the shared predicates and build a new AND expression
+                predicate_parts = []
+                for pred in shared_predicates:
+                    try:
+                        pred_ast = parse_one(pred, dialect="bigquery")
+                        predicate_parts.append(pred_ast)
+                    except Exception:
+                        # If parsing fails, use the predicate as-is
+                        predicate_parts.append(pred)
+
+                # Combine predicates with AND
+                if len(predicate_parts) == 1:
+                    new_where = predicate_parts[0]
+                elif len(predicate_parts) > 1:
+                    # Build AND expression
+                    new_where = predicate_parts[0]
+                    for pred_part in predicate_parts[1:]:
+                        new_where = exp.And(this=new_where, expr=pred_part)
+                else:
+                    # No predicates left, remove WHERE clause
+                    new_where = None
+
+                if new_where:
+                    ast.set("where", exp.Where(this=new_where))
+                else:
+                    # Remove WHERE clause entirely
+                    ast.args.pop("where", None)
+            else:
+                # No shared predicates, remove WHERE clause entirely
+                ast.args.pop("where", None)
+
+        # Remove ORDER BY and LIMIT clauses (not allowed in MVs)
+        ast.args.pop("order", None)
+        ast.args.pop("limit", None)
+
+        # Generate SQL from modified AST
+        mv_query = ast.sql(dialect="bigquery")
 
         return mv_query
 
@@ -1227,11 +1391,16 @@ FROM {base_table}
         group_by_expressions: list[str],
         select_expressions: list[str],
         query_hash: str,
+        has_ctes: bool = False,
+        join_types: list[str] | None = None,
     ) -> None:
         """Validate that the generated MV provides actual optimization value.
 
         Rejects "Identity MVs" which are just SELECT ... FROM ... without
-        any filtering or aggregation.
+        any filtering, aggregation, DISTINCT, CTEs, or joins.
+
+        This validation MUST match the analyzer's identity MV check
+        in analyzer.py:396-410 to ensure consistency.
         """
         has_filters = len(shared_predicates) > 0
         has_aggregation = len(group_by_expressions) > 0
@@ -1239,11 +1408,15 @@ FROM {base_table}
         # Check if SELECT contains DISTINCT (heuristic)
         # We check upper case, though usually expressions are extracted as-is
         has_distinct = any("DISTINCT" in expr.upper() for expr in select_expressions)
+        has_joins = bool(join_types)
 
-        if not (has_filters or has_aggregation or has_distinct):
+        # Identity MV: None of the optimization value indicators are present
+        # This MUST match the analyzer's logic in analyzer.py:396-410
+        if not (has_filters or has_aggregation or has_distinct or has_ctes or has_joins):
             raise MVGenerationError(
                 "Generated MV provides no optimization value (Identity MV). "
-                "It lacks filtering, aggregation, or DISTINCT, resulting in a simple projection of the base table.",
+                "It lacks filtering, aggregation, DISTINCT, CTEs, or joins, "
+                "resulting in a simple projection of the base table.",
                 reason="identity_mv",
                 query_hash=query_hash,
             )
